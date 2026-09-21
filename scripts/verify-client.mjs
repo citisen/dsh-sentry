@@ -937,6 +937,18 @@ globalThis.window.removeEventListener = (type) => listeners.delete(type)
 globalThis.window.matchMedia = () => ({ matches: false })
 globalThis.window.AudioContext = undefined
 
+/**
+ * Every `sync` the row's bound store performed.
+ *
+ * The registry mints ONE store instance per entry and hands its actions to the
+ * inject face; that instance is what the row renders from. A plugin that builds
+ * its own with `store.create()` gets a second, unwatched instance, syncs that one
+ * happily, and leaves the rendered one on its `init()` values — a row that never
+ * appears, with nothing thrown and nothing logged. The `register` stub below
+ * makes `create()` unusable, so that whole class of mistake fails loudly here.
+ */
+const rowBindings = []
+
 const ctx = {
   effect: (execute) => {
     const disposer = execute()
@@ -980,8 +992,21 @@ const ctx = {
       assert.equal(name, 'settings.general.item')
       callback()
     },
+    /**
+     * The registry face. It REPLACES the declared store handle with the mounted
+     * instance's actions, which is what the inject face receives — so the stub
+     * does the same, recording each `sync` for the assertions below.
+     * @param options - the entry's registration options.
+     * @param component - the entry's component.
+     * @returns the entry id.
+     */
     register: (options, component) => {
-      registeredSlots.push({ options, component })
+      const bound = {
+        sync: (state, revision) => {
+          rowBindings.push({ state: { ...state }, revision })
+        },
+      }
+      registeredSlots.push({ options: { ...options, store: bound }, component })
       return () => undefined
     },
   },
@@ -1082,10 +1107,18 @@ const ctx = {
   assert.equal(shown(documentStub.title), 'Part one · Part two — DeepSeek Harness', 'and the title prefix comes off')
 
   // ── the switches ──────────────────────────────────────────────────────────
-  const actions = options.inject()
+  //
+  // The row binds the actions the registry hands it, and the mounted instance is
+  // the only thing the assertions get to observe: `register` replaced the store
+  // handle with its own `bindings` face, so a plugin that minted its own instance
+  // would sync an object nothing here ever looks at and this block would fail.
+  assert.equal(rowBindings.length, 0, 'no sync may happen before the registry injects the entry face')
+  const actions = options.inject(options.store)
   assert.equal(typeof actions.setField, 'function')
   assert.equal(typeof actions.reset, 'function')
   assert.equal(typeof actions.preview, 'function')
+  assert.equal(rowBindings.length, 1, 'injecting the entry face syncs the mounted store once')
+  assert.equal(rowBindings[0].state.favicon, true, 'with the resolved settings, not the store defaults')
 
   // A fresh instance must not have kept the stale plan: the settings write
   // re-renders from the live subscriptions.
@@ -1098,6 +1131,7 @@ const ctx = {
 
   actions.setField('favicon', false)
   assert.equal(icon.parentNode, null, 'the favicon switch removes the icon immediately')
+  assert.equal(rowBindings.at(-1).state.favicon, false, 'and the mounted store followed the write')
   assert.equal(
     shown(documentStub.title),
     'alert.status.running · Part one · Part two — DeepSeek Harness',
