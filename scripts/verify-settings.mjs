@@ -222,28 +222,37 @@ assert.deepEqual(
   'the host-resolved defaults and the browser half defaults must be the same value',
 )
 assert.deepEqual(hostDefaults, client.SETTING_DEFAULTS, 'and equal to the shipped browser defaults')
-assert.equal(hostDefaults.soundDone, true, 'every channel is on out of the box')
+assert.equal(
+  hostDefaults.style,
+  client.DEFAULT_STYLE,
+  'both halves must ship the same document, byte for byte',
+)
 
 // A write goes through the real validation and commit path.
-await provider.update(ALERT_NAMESPACE, { volume: 0.8, sound: false })
+await provider.update(ALERT_NAMESPACE, { style: 'icon off\n\ntitle off' })
 const afterWrite = provider.get(ALERT_NAMESPACE)
-assert.equal(afterWrite.volume, 0.8)
-assert.equal(afterWrite.sound, false)
-assert.equal(afterWrite.title, true, 'an unpatched field keeps its default')
+assert.equal(afterWrite.style, 'icon off\n\ntitle off')
+assert.equal(afterWrite.style, 'icon off\n\ntitle off', 'the document is stored as written')
 assert.ok(
   provider.describe().find((entry) => entry.ns === ALERT_NAMESPACE).user !== undefined,
   'a written field must surface as a user override for the settings UI',
 )
 
-// The schema is the guard rail: the Settings row cannot offer a value the schema
-// rejects, and a hand-edited document cannot smuggle one past registration.
+// The schema is the guard rail, and it guards exactly one thing: that the field is
+// a document. What the document *says* is the browser half's reader's business —
+// it reports what it cannot use and falls back property by property — so this must
+// not grow a second opinion about the text.
 await assert.rejects(
-  () => provider.update(ALERT_NAMESPACE, { volume: 3 }),
-  'an out-of-range volume must be refused by the real service',
+  () => provider.update(ALERT_NAMESPACE, { style: 42 }),
+  'a number where the document belongs must be refused by the real service',
 )
-await assert.rejects(() => provider.update(ALERT_NAMESPACE, { volume: -1 }))
-await assert.rejects(() => provider.update(ALERT_NAMESPACE, { favicon: 'off' }))
-assert.equal(provider.get(ALERT_NAMESPACE).volume, 0.8, 'a refused write must not commit')
+await assert.rejects(() => provider.update(ALERT_NAMESPACE, { style: 42 }))
+await assert.rejects(() => provider.update(ALERT_NAMESPACE, { style: ['icon on'] }))
+assert.equal(
+  provider.get(ALERT_NAMESPACE).style,
+  'icon off\n\ntitle off',
+  'a refused write must not commit',
+)
 
 // A reset re-inherits every default, which is what the row's reset button is for.
 await provider.replace(ALERT_NAMESPACE, {})
@@ -252,7 +261,7 @@ assert.deepEqual(provider.get(ALERT_NAMESPACE), hostDefaults, 'replace({}) must 
 // ── a stored document is validated at registration, not trusted ─────────────
 {
   const bad = new Context()
-  const badProvider = new MemorySettings(bad, { alert: { volume: 3 } })
+  const badProvider = new MemorySettings(bad, { alert: { style: 42 } })
   await initialise(badProvider)
   let threw = false
   const badWarnings = []
@@ -281,6 +290,6 @@ if (warnings.length > 0) {
 
 console.log('verify-settings: OK — the real settings service accepted the namespace')
 console.log(
-  `verify-settings: resolved defaults match the browser half (favicon=${String(hostDefaults.favicon)}, soundDone=${String(hostDefaults.soundDone)}, volume=${String(hostDefaults.volume)})`,
+  `verify-settings: resolved defaults match the browser half (style is ${String(hostDefaults.style.length)} characters on both sides)`,
 )
 

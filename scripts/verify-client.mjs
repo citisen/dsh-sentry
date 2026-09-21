@@ -298,6 +298,21 @@ function planFor(states) {
 const IDLE = planFor([])
 const OPTIONS = { reducedMotion: false }
 
+/**
+ * The transform the fish is placed with, derived the way the plugin derives it.
+ *
+ * Shared by the two blocks below so the still fish and the turning fish cannot be
+ * placed by different rules — and, more to the point, so the rule is written once, in
+ * terms of the art's OWN extent. The bug this pins centred a 50-unit drawing as if it
+ * were a 32-unit one, which put the fish in the corner of the background.
+ * @param scale - the fish's scale.
+ * @returns the `transform` value.
+ */
+function placement(scale) {
+  const margin = Math.round((16 - (plugin.FISH_ART_EXTENT / 2) * scale) * 100) / 100
+  return `translate(${String(margin)} ${String(margin)}) scale(${String(scale)})`
+}
+
 {
   assert.equal(plugin.sentryFavicon(IDLE, OPTIONS), undefined, 'nothing to report draws nothing')
   assert.equal(
@@ -330,20 +345,32 @@ const OPTIONS = { reducedMotion: false }
     'the painted layer is one rect in the state colour, carved by the mask',
   )
 
-  // Full size means the 50x50 art scaled by 32/50 = 0.64, which is exactly what
-  // "not shrunk any more" means. The first version used 0.416 and the fish became
-  // a ~5px smudge inside a ring nobody could see either.
-  const shift = 16 - 16 * 0.64
+  // Full size means the art's own 50 units scaled by 32/50 = 0.64, and the placement is
+  // built from the same constant: the art's centre is 25 in ITS OWN units, so the margin
+  // that puts it on the canvas centre is `16 - 25 * scale`. The version this replaced
+  // centred the art as if it were a 32-unit drawing (`16 - 16 * scale`), which held the
+  // fish 5.76px down and to the right of the middle — the bottom-right corner of the
+  // rounded square it was reported from — with its nose and tail cut off by the rim.
+  //
+  // The extent is a fact about the art, not a number to trust, so it is measured here
+  // from the path data itself: the coordinates must fit in the claimed canvas and must
+  // fill it.
+  const coords = [...FISH.matchAll(/-?\d+(?:\.\d+)?/g)].map((match) => Number(match[0]))
   assert.ok(
-    svg.includes(`translate(${String(shift)} ${String(shift)}) scale(0.64) translate(-16 -16) translate(16 16)`),
-    'centered at full size',
+    Math.max(...coords) <= plugin.FISH_ART_EXTENT,
+    `the art's coordinates (max ${String(Math.max(...coords))}) must fit its own canvas`,
   )
+  assert.ok(
+    Math.max(...coords) > plugin.FISH_ART_EXTENT * 0.9,
+    'and must fill it, or the extent being cented on is the wrong one',
+  )
+  assert.ok(svg.includes(placement(plugin.FISH_FULL_SCALE)), 'the art is placed by its own centre')
 
   // Nothing is carved but the fish. The dial-like patterns — spokes, hands, petals,
   // windmill, dots, rays — were all tried at 16px and all read as noise around a
-  // fish nobody could then see, so the vocabulary is down to `none` and the icon
-  // says its state with colour, shape, motion, and the fish itself.
-  assert.deepEqual(plugin.PATTERNS, [], 'the pattern vocabulary is empty; the bare word none is a shape')
+  // fish nobody could then see, so the vocabulary is gone entirely and the icon says
+  // its state with colour, shape, motion, and the fish itself.
+  assert.equal('pattern' in plugin.DEFAULT_LOOK.running, false, 'there is no pattern slot left to configure')
   assert.equal(mask.split('<rect').length - 1, 1, 'the only rect in the mask is its own black base')
   assert.equal(mask.split('<circle').length - 1, 1, 'and the only circle is the background outline')
 }
@@ -355,10 +382,11 @@ const OPTIONS = { reducedMotion: false }
   const still = plugin.sentryFavicon(planFor(['running']), { ...OPTIONS, motion: { angle: 0 } })
   const turned = plugin.sentryFavicon(planFor(['running']), { ...OPTIONS, motion: { angle: 90 } })
 
-  const turnScale = 0.64 * plugin.FISH_TURN_SCALE
-  const turnShift = Math.round((16 - 16 * turnScale) * 100) / 100
+  // The turning fish is placed by the same rule at the smaller scale it turns at, so it
+  // stays centred while its swept corners stay inside the background.
+  const turnScale = plugin.FISH_FULL_SCALE * plugin.FISH_TURN_SCALE
   assert.ok(
-    turned.includes(`translate(${String(turnShift)} ${String(turnShift)}) scale(${String(Math.round(turnScale * 1e6) / 1e6)})`),
+    turned.includes(placement(turnScale)),
     'a turning fish shrinks to keep its swept corners inside the background',
   )
   assert.ok(turned.includes('rotate(90 16 16)'), 'and rotates about the canvas centre')
@@ -380,11 +408,7 @@ const OPTIONS = { reducedMotion: false }
   )
 
   // A still fish is at full size: the shrink exists for the turn, not for the icon.
-  const fullShift = Math.round((16 - 16 * 0.64) * 100) / 100
-  assert.ok(
-    still.includes(`translate(${String(fullShift)} ${String(fullShift)}) scale(0.64) translate(-16 -16) translate(16 16)`),
-    'a still fish stays full size',
-  )
+  assert.ok(still.includes(placement(plugin.FISH_FULL_SCALE)), 'a still fish stays full size')
   assert.ok(!still.includes('rotate('), 'and does not rotate')
 }
 
@@ -444,7 +468,7 @@ const OPTIONS = { reducedMotion: false }
   assert.equal(plugin.DEFAULT_LOOK.waiting.color, plugin.DEFAULT_LOOK.approval.color)
   assert.notEqual(plugin.DEFAULT_LOOK.waiting.speed, plugin.DEFAULT_LOOK.approval.speed)
   assert.equal(plugin.DEFAULT_LOOK.running.motion, 'turn', 'the running state turns the fish')
-  assert.equal(plugin.DEFAULT_LOOK.running.pattern, 'none', 'and carves no pattern around it')
+  assert.equal('pattern' in plugin.DEFAULT_LOOK.running, false, 'and has nothing else to configure')
   assert.equal(plugin.PRESET_COLORS[plugin.DEFAULT_LOOK.done.color], '#22c55e')
 
   // The two shapes the user asked for: rounded exists, and `none` really means no
@@ -467,125 +491,205 @@ const OPTIONS = { reducedMotion: false }
 }
 
 {
-  // ── the style DSL ─────────────────────────────────────────────────────────
+  // ── the style document ────────────────────────────────────────────────────
   //
-  // The document is the interface, so the parser's tolerance is a feature and not
-  // an accident: a typo must degrade to the shipped appearance rather than to a
-  // tab with no icon.
+  // The document is the interface, so the reader's tolerance is a feature and not
+  // an accident: a line it cannot use is reported and that one property falls back
+  // to its shipped value, rather than leaving a tab without an icon.
   const shipped = plugin.resolveStyle(plugin.DEFAULT_STYLE)
-  assert.deepEqual(shipped.problems, [], 'the shipped document must parse cleanly')
+  assert.deepEqual(shipped.problems, [], 'the shipped document must read cleanly')
   for (const state of plugin.STYLE_STATES) {
-    assert.deepEqual(shipped.look[state], plugin.DEFAULT_LOOK[state], `${state} round-trips through the DSL`)
+    assert.deepEqual(shipped.look[state], plugin.DEFAULT_LOOK[state], `${state} round-trips through the document`)
   }
+  assert.deepEqual(
+    Object.keys(shipped.sound.channels).sort(),
+    [...plugin.CHIME_STATES].sort(),
+    'every state with a sound event is chimed by the shipped document',
+  )
+  assert.deepEqual(shipped.globals, plugin.DEFAULT_GLOBALS, 'and it resolves to the shipped document settings')
 
-  // A positional line and a key=value line describe the same thing. `rectangle` is
-  // not a shape and `petals` is no longer a pattern, so both are refused and the
-  // line's remaining tokens still land in their own slots.
-  const positional = plugin.resolveStyle('running rectangle blue petals still 2').look.running
-  const keyed = plugin.resolveStyle('running shape=square color=amber pattern=none motion=turn speed=4').look.running
-  assert.equal(positional.shape, plugin.DEFAULT_LOOK.running.shape, 'an unknown positional shape is refused')
-  assert.equal(positional.color, 'blue', 'a known colour is taken')
+  // Every property is named, so a block may name them in any order: the order is
+  // the writer's rather than the reader's, which is the whole point of dropping the
+  // positional spelling.
+  const reordered = plugin.resolveStyle(
+    ['done {', '  chime A4', '  speed 4s', '  motion still', '  color purple', '  shape square', '}'].join('\n'),
+  )
+  assert.deepEqual(reordered.problems, [])
+  assert.deepEqual(reordered.look.done, { shape: 'square', color: 'purple', motion: 'still', speed: 4 })
+
+  // A block a document omits keeps every shipped default for that state, and a
+  // property a block omits keeps its own — the reader is told what changed, not
+  // what the whole document is.
+  const partial = plugin.resolveStyle('done {\n  color purple\n}')
+  assert.equal(partial.look.done.color, 'purple')
+  assert.equal(partial.look.done.shape, plugin.DEFAULT_LOOK.done.shape, 'an omitted property keeps its default')
+  assert.equal(partial.look.done.motion, plugin.DEFAULT_LOOK.done.motion)
+  assert.deepEqual(partial.look.running, plugin.DEFAULT_LOOK.running, 'a state with no block keeps all of it')
+
+  // A duration carries its unit, and a bare number is seconds — one rule for the
+  // motion rate, the chime gap, and the completed window.
+  assert.equal(plugin.parseDuration('1.5s'), 1.5)
+  assert.equal(plugin.parseDuration('800ms'), 0.8)
+  assert.equal(plugin.parseDuration('2m'), 120)
+  assert.equal(plugin.parseDuration('3'), 3, 'a bare number is seconds')
+  assert.equal(plugin.parseDuration('later'), undefined)
+  assert.equal(plugin.resolveStyle('running {\n  speed 800ms\n}').look.running.speed, 0.8)
+  assert.equal(plugin.resolveStyle('keep-done 2m').globals.keepDoneMs, 120_000)
+  assert.equal(plugin.resolveStyle('chime-gap 300ms').globals.chimeGapMs, 300)
+
+  // An out-of-range value is reported and falls back rather than drawing something
+  // absurd, and the report names the range.
+  const tooFast = plugin.resolveStyle('running {\n  speed 0\n}')
+  assert.ok(tooFast.problems.some((problem) => problem.message.includes('speed')), 'the rate is named')
+  assert.equal(tooFast.look.running.speed, plugin.DEFAULT_LOOK.running.speed, 'and the shipped rate stands')
+  assert.equal(plugin.resolveStyle('running {\n  speed 999\n}').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
   assert.equal(
-    positional.pattern,
-    plugin.DEFAULT_LOOK.running.pattern,
-    'a pattern that is no longer in the vocabulary is refused rather than drawn',
+    plugin.resolveStyle('done {\n  volume 3\n}').sound.channels.done.gain,
+    plugin.DEFAULT_VOLUME,
+    'a loudness outside 0–1 is refused and the shipped one stands',
   )
-  assert.equal(positional.motion, 'still', 'and a known motion')
-  assert.equal(positional.speed, 2, 'with its rate')
-  assert.deepEqual(keyed, { shape: 'square', color: 'amber', pattern: 'none', motion: 'turn', speed: 4 })
 
-  // A bare `none` is a SHAPE. It is also the word the pattern slot used to take,
-  // and while the two vocabularies overlapped the parser spent the token on the
-  // pattern and left the shape at its default — so `running none` still drew a
-  // circle. That is the bug this pins.
-  assert.equal(plugin.resolveStyle('running none').look.running.shape, 'none', 'a bare `none` is a shape')
-  assert.equal(plugin.resolveStyle('running shape=none').look.running.shape, 'none', 'and so is the explicit form')
-  assert.equal(plugin.resolveStyle('running circle pattern=none').look.running.pattern, 'none', 'the pattern keeps its explicit spelling')
-  assert.deepEqual(plugin.resolveStyle('running none').problems, [], 'and none of it is reported as a problem')
+  // ── loudness is one number, from one of two lines ─────────────────────────
+  //
+  // The document's `volume` is the default every chimed state uses; a block's own
+  // `volume` replaces it. Neither multiplies the other, so the row prints one of the two
+  // numbers rather than a product a reader cannot find in the document.
+  assert.ok(plugin.STYLE_GLOBAL_KEYS.includes('volume'), 'the document has a default loudness')
+  const overridden = plugin.resolveStyle('volume 0.8\n\ndone {\n  volume 0.2\n}').sound.channels
+  assert.equal(overridden.done.gain, 0.2, 'a block replaces the document default')
+  assert.equal(overridden.waiting.gain, 0.8, 'and the default still governs the states that say nothing')
+  assert.equal(overridden.done.unstated, false, 'a number from either line is a number the reader can find')
+  assert.equal(overridden.waiting.unstated, false)
+  const unstatedGain = plugin.resolveStyle('waiting {\n  chime A5\n}').sound.channels.waiting
+  assert.equal(unstatedGain.gain, plugin.DEFAULT_VOLUME, 'a document that names no loudness at all falls back')
+  assert.equal(unstatedGain.unstated, true, 'and the row is told to mark that one as the default')
 
-  // A bare number is the rate, wherever it appears. It used to be dropped into
-  // whichever slot happened to be free next, which made the documented
-  // `running none turn 3` report "3 is not a valid color".
-  const withRate = plugin.resolveStyle('running none turn 3')
-  assert.deepEqual(withRate.problems, [], 'a trailing number after a shape and a motion is a rate')
-  assert.equal(withRate.look.running.speed, 3)
-  assert.equal(withRate.look.running.shape, 'none')
-  assert.equal(plugin.resolveStyle('waiting none blink 1.1').look.waiting.speed, 1.1)
-  assert.deepEqual(plugin.resolveStyle('done none flush 1.6').problems, [])
+  // ── notes are notes ───────────────────────────────────────────────────────
+  // The chime reads as music: a name in, a frequency out, played in the order it
+  // was written. `A4 = 440` is the anchor, and a sharp and its flat are one key.
+  assert.equal(plugin.noteFrequency('A4'), 440)
+  assert.equal(plugin.noteFrequency('A5'), 880)
+  assert.equal(plugin.noteFrequency('C#4'), plugin.noteFrequency('Db4'), 'an accidental is part of the note')
+  assert.equal(plugin.noteFrequency('H9'), undefined)
+  const chime = plugin.resolveStyle('waiting {\n  chime A5 E6\n}').sound.channels.waiting
+  assert.deepEqual(chime.labels, ['A5', 'E6'], 'the labels are kept for the row to print')
+  assert.equal(chime.frequencies[0], 880)
+  assert.ok(chime.frequencies[1] > chime.frequencies[0], 'the pair rises')
+  assert.equal(
+    plugin.resolveStyle('waiting {\n  chime 880 1318.5\n}').sound.channels.waiting.frequencies[0],
+    880,
+    'a frequency in Hz is a note too',
+  )
 
-  // Later tokens win within a line, which is the only sensible reading of a
-  // document that says the same thing twice. The shipped lines therefore name the
-  // shape once and nothing else positional, so nothing can overwrite it.
-  assert.equal(plugin.resolveStyle('running rounded purple none turn 1').look.running.shape, 'none', 'the last shape named wins')
-  assert.equal(plugin.resolveStyle('running rounded purple none turn 1').look.running.color, 'purple')
-  assert.equal(plugin.resolveStyle('running circle blue turn 2').look.running.shape, 'circle')
-  assert.equal(plugin.resolveStyle('running circle blue turn 2').look.running.speed, 2)
+  // `off` removes the channel outright, and the states either side keep theirs: one
+  // state's silence is not every state's silence.
+  const silenced = plugin.resolveStyle('waiting {\n  chime off\n}')
+  assert.deepEqual(silenced.problems, [], '`off` is a spelling, not a problem')
+  assert.equal(silenced.sound.channels.waiting, undefined)
+  assert.ok(silenced.sound.channels.approval !== undefined, 'the approval keeps its chime')
+  assert.ok(silenced.sound.channels.done !== undefined)
 
-  // The pattern vocabulary is empty, so a name from it is now reported rather
-  // than silently accepted: a document written against an older release must not
-  // look like it did something.
-  const stale = plugin.resolveStyle('running circle blue spokes=2 turn 3')
+  // The shipped document gives each chimed state its own loudness, and that is the
+  // whole of the arithmetic: no master, no factor, nothing for the row to multiply.
+  const shippedChannels = plugin.resolveStyle(plugin.DEFAULT_STYLE).sound.channels
+  assert.equal(shippedChannels.waiting.gain, 0.5, 'the waiting state takes the document default')
+  assert.equal(shippedChannels.approval.gain, 0.45, 'the approval overrides it')
+  assert.equal(shippedChannels.done.gain, 0.25, 'and a completion is the quiet one')
+  assert.equal(
+    Object.values(shippedChannels).every((channel) => channel.unstated === false),
+    true,
+    'every number the row prints is a line of the document',
+  )
+  // Which is the point: a reader who changes one of those lines sees that number on the
+  // card, so the card can never disagree with the document beside it.
+  assert.equal(plugin.resolveStyle('volume 1').sound.channels.waiting.gain, 1)
+  assert.equal(plugin.resolveStyle('done {\n  volume 0.1\n}').sound.channels.done.gain, 0.1)
+  assert.equal(
+    plugin.resolveStyle('done {\n  volume 0.1\n}').sound.channels.waiting.gain,
+    plugin.DEFAULT_VOLUME,
+    'and a block that overrides only touches its own state',
+  )
+
+  // `#` belongs to note names, so it cannot also start a comment. `//` does, and a
+  // comment after a value does not become part of it.
+  const commented = plugin.resolveStyle('// a comment\n\nrunning {\n  color red // trailing\n}')
+  assert.deepEqual(commented.problems, [])
+  assert.equal(commented.look.running.color, 'red')
+  assert.equal(
+    plugin.resolveStyle('waiting {\n  chime C#4\n}').sound.channels.waiting.frequencies[0],
+    plugin.noteFrequency('C#4'),
+    'a sharp is a note rather than the start of a comment',
+  )
+
+  // ── what a mistake earns ──────────────────────────────────────────────────
+  // One deliberate mistake per line, so every diagnostic's range can be checked
+  // against the text it underlines, and so the codes below are the codes the
+  // editor reports for the same document.
+  const messy = plugin.resolveStyle(
+    [
+      'nonsense 3',
+      'waiting {',
+      '  shape circl',
+      '  volume 3',
+      '}',
+      'running {',
+      '  chime A5',
+      '}',
+      'approval',
+      '}}',
+      'done {',
+      '  speed 2s',
+    ].join('\n'),
+  )
+  const codes = messy.problems.map((problem) => problem.code)
+  for (const code of [
+    'unknown-key',
+    'bad-value',
+    'inert-property',
+    'unopened-block',
+    'stray-brace',
+    'unclosed-block',
+  ]) {
+    assert.ok(codes.includes(code), `${code} must be reported`)
+  }
   assert.ok(
-    stale.problems.some((problem) => problem.includes('spokes')),
-    'a removed pattern is reported rather than ignored',
+    messy.problems.every((problem) => typeof problem.line === 'number' && problem.message.length > 0),
+    'every problem carries a line and a message',
   )
-  assert.deepEqual(stale.look.running, plugin.DEFAULT_LOOK.running, 'and the shipped look stands')
+  assert.ok(
+    messy.problems.some((problem) => problem.severity === 'warning'),
+    'a property that does nothing is a warning rather than an error',
+  )
+  assert.equal(messy.look.waiting.shape, plugin.DEFAULT_LOOK.waiting.shape, 'a refused value falls back')
+  assert.equal(messy.look.done.speed, 2, 'and a good line beside a bad one still applies')
+
+  // The reader is total: an absent or corrupt document is not a problem, and the
+  // engine still has an appearance to draw.
+  assert.deepEqual(plugin.resolveStyle(undefined).look, plugin.DEFAULT_LOOK)
+  assert.equal(plugin.resolveStyle(undefined).problems.length, 0, 'an absent document is not a problem')
+  assert.equal(
+    plugin.readStyleDocument(42, { states: plugin.STYLE_STATES }).problems.length,
+    0,
+    'and neither is a corrupt one',
+  )
+
+  // A document is what drives the icon, end to end: the same state, two documents.
+  const styled = plugin.resolveStyle('running {\n  shape square\n  color purple\n  motion still\n  speed 4s\n}').look
+  const svg = plugin.sentryFavicon(planFor(['running']), { reducedMotion: false, style: styled })
+  assert.ok(svg.includes('fill="#8b5cf6"'), 'the document chooses the colour')
+  assert.ok(svg.includes('rx="4"'), 'and the shape')
+  assert.ok(!svg.includes('rotate('), 'and still means still')
 
   // A shape of `none` really is no background: the mask keeps nothing, so the only
   // thing the painted layer shows is the carved fish.
   const bare = plugin.sentryFavicon(planFor(['running']), {
     reducedMotion: false,
-    style: plugin.resolveStyle('running none').look,
+    style: plugin.resolveStyle('running {\n  shape none\n}').look,
   })
   const mask = /<mask id="disc"[^>]*>([\s\S]*?)<\/mask>/.exec(bare)?.[1] ?? ''
   assert.equal(mask.split('<circle').length - 1, 0, 'no background outline is kept')
   assert.equal(mask.split('<rect').length - 1, 1, 'only the mask base is a rect')
   assert.ok(mask.includes(`<path d="${FISH}"`), 'and the fish is still carved')
-
-  // Fields a line omits keep that state's shipped value.
-  const partial = plugin.resolveStyle('done color=purple').look.done
-  assert.equal(partial.color, 'purple')
-  assert.equal(partial.shape, plugin.DEFAULT_LOOK.done.shape, 'an omitted field keeps the default')
-  assert.equal(partial.motion, plugin.DEFAULT_LOOK.done.motion)
-
-  // Problems are reported rather than thrown, and never produce a broken icon.
-  const messy = plugin.resolveStyle('running\nnonsense blue\nwaiting circle blue nope spin 1')
-  assert.ok(messy.problems.some((problem) => problem.includes('nonsense')), 'an unknown state is reported')
-  assert.ok(messy.problems.some((problem) => problem.includes('nope')), 'an unknown pattern is reported')
-  assert.equal(messy.look.waiting.pattern, plugin.DEFAULT_LOOK.waiting.pattern, 'and falls back')
-  assert.equal(messy.look.waiting.motion, plugin.DEFAULT_LOOK.waiting.motion)
-  assert.equal(messy.look.running.color, plugin.DEFAULT_LOOK.running.color, 'a state named with no options keeps every default')
-
-  // Out-of-range numbers keep the default rather than drawing something absurd.
-  assert.equal(plugin.resolveStyle('running marks=99').look.running.marks, plugin.DEFAULT_LOOK.running.marks)
-  assert.equal(plugin.resolveStyle('running speed=0').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
-  assert.equal(plugin.resolveStyle('running speed=999').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
-
-  // A document is what drives the icon, end to end: the same state, two styles.
-  const styled = plugin.resolveStyle('running rounded purple still 4').look
-  const svg = plugin.sentryFavicon(planFor(['running']), { reducedMotion: false, style: styled })
-  assert.ok(svg.includes('fill="#8b5cf6"'), 'the document chooses the colour')
-  assert.ok(svg.includes('rx="8"'), 'and the shape')
-  assert.ok(!svg.includes('rotate('), 'and still means still')
-
-  // The same document with the shape set to `none` draws no background at all.
-  const shapeNone = plugin.resolveStyle('running none purple still 4').look
-  const bareSvg = plugin.sentryFavicon(planFor(['running']), { reducedMotion: false, style: shapeNone })
-  assert.ok(!bareSvg.includes('rx="8"') && !bareSvg.includes('<circle cx="16" cy="16" r="15.2"'), 'no background is drawn')
-  assert.ok(bareSvg.includes('mask="url(#disc)"'), 'but the fish is still carved out of the painted rect')
-
-  // Out-of-range numbers keep the default rather than drawing something absurd.
-  assert.equal(plugin.resolveStyle('running speed=0').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
-  assert.equal(plugin.resolveStyle('running speed=999').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
-
-  // Comments and blank lines are ignored, and a colour that is not a preset is
-  // refused rather than passed through to the SVG.
-  const commented = plugin.resolveStyle('# a comment\n\nrunning circle red none still 1')
-  assert.equal(commented.look.running.color, 'red')
-  assert.equal(plugin.resolveStyle('running circle #ff0000 none still 1').look.running.color, plugin.DEFAULT_LOOK.running.color)
-
-  assert.equal(plugin.resolveStyle(undefined).problems.length, 0, 'an absent document is not a problem')
-  assert.equal(plugin.parseStyle(42).problems.length, 0, 'and neither is a corrupt one')
 }
 
 // ── the grammar is this repo's own code ─────────────────────────────────────
@@ -604,17 +708,28 @@ const OPTIONS = { reducedMotion: false }
   // grammar rather than one that merely defaults to the same words.
   const grammar = plugin.dshSentryStyleGrammar({
     states: plugin.STYLE_STATES,
+    keys: { global: plugin.STYLE_GLOBAL_KEYS, state: plugin.STYLE_STATE_KEYS },
+    spec: plugin.STYLE_SPEC,
     shapes: plugin.SHAPES,
-    motions: plugin.MOTIONS_LIST,
+    motions: plugin.MOTIONS,
     colors: plugin.PRESET_COLORS,
-    patterns: plugin.PATTERNS,
-    options: plugin.STYLE_OPTIONS,
+    modes: plugin.MODES,
+    notes: ['A3', 'C4', 'E4', 'A4', 'C5', 'E5', 'A5', 'E6'],
     defaults: plugin.DEFAULT_LOOK,
   })
 
-  // The two layers agree about the document the plugin ships: the parser the icon is drawn
-  // from and the grammar the editor is written against. Neither has anything to say about it.
-  assert.deepEqual(plugin.parseStyle(plugin.DEFAULT_STYLE).problems, [], 'the plugin’s own parser is silent on the shipped document')
+  // The two layers agree about the document the plugin ships: the reader the engine
+  // is drawn from and the grammar the editor is written against. This is the
+  // assertion the shared walk exists to make cheap — they are the same walk.
+  assert.deepEqual(
+    plugin.readStyleDocument(plugin.DEFAULT_STYLE, {
+      states: plugin.STYLE_STATES,
+      keys: { global: plugin.STYLE_GLOBAL_KEYS, state: plugin.STYLE_STATE_KEYS },
+      spec: plugin.STYLE_SPEC,
+    }).problems,
+    [],
+    'the plugin’s own reader is silent on the shipped document',
+  )
   assert.deepEqual(inspect(plugin.DEFAULT_STYLE, grammar).diagnostics, [], 'and so is the grammar over it')
 
   // ── the paint ─────────────────────────────────────────────────────────────
@@ -625,22 +740,27 @@ const OPTIONS = { reducedMotion: false }
   /** @param word - a word of the document. @returns the scope it was painted with. */
   const scopeOf = (word) => painted.find((token) => token.text === word)?.scope
   for (const [word, scope] of [
-    ['running', 'state'],
-    ['circle', 'value.shape'],
-    ['blue', 'value.color'],
-    ['turn', 'value.motion'],
-    ['3', 'value.number'],
     ['waiting', 'state'],
-    ['amber', 'value.color'],
-    ['blink', 'value.motion'],
-    ['1.1', 'value.number'],
-    ['approval', 'state'],
+    ['{', 'punctuation'],
+    ['shape', 'property'],
     ['rounded', 'value.shape'],
-    ['1.9', 'value.number'],
-    ['done', 'state'],
-    ['green', 'value.color'],
-    ['flush', 'value.motion'],
-    ['1.6', 'value.number'],
+    ['color', 'property'],
+    ['amber', 'value.color'],
+    ['motion', 'property'],
+    ['blink', 'value.motion'],
+    ['speed', 'property'],
+    ['1.1s', 'value.number'],
+    ['chime', 'property'],
+    ['A5', 'value.note'],
+    ['icon', 'property'],
+    ['on', 'value.mode'],
+    ['sound', 'property'],
+    ['background', 'value.mode'],
+    ['chime-gap', 'property'],
+    ['keep-done', 'property'],
+    ['volume', 'property'],
+    ['0.5', 'value.number'],
+    ['}', 'punctuation'],
   ]) {
     assert.equal(scopeOf(word), scope, `${word} must paint as ${scope}`)
   }
@@ -649,22 +769,22 @@ const OPTIONS = { reducedMotion: false }
     0,
     'nothing in the shipped document is painted as a mistake',
   )
-  // The `key=value` spelling is painted too: the key is a property and its `=` an operator,
-  // and both the hover text and the unknown-option check are keyed on that scope.
-  const keyed = scan('running shape=none', grammar).tokens
-  assert.equal(keyed.find((token) => token.text === 'shape')?.scope, 'property')
-  assert.equal(keyed.find((token) => token.text === '=')?.scope, 'operator')
 
-  // ── the problems, and where they point ────────────────────────────────────
-  // One deliberate mistake per line, so every diagnostic's range can be checked against the
-  // text it underlines. Three of them are errors the host parser also reports; the fourth is
-  // the warning it does NOT — `parseStyle` writes `color=mauve` into the rule and lets the
-  // shipped colour stand in silence, which is the difference this grammar exists to close.
+  // ── the diagnostics, and where they point ─────────────────────────────────
+  // One deliberate mistake per line, so every diagnostic's range can be checked
+  // against the text it underlines. The reader finds them first and the grammar
+  // reports the same list, which is the point of the two sharing one walk.
   const broken = [
-    'running circl',
-    'waiting shap=circle',
-    'nonsense circle',
-    'done color=mauve',
+    'waiting {',
+    '  shape circl',
+    '}',
+    'nonsense 1',
+    'running {',
+    '  chime A5',
+    '}',
+    'approval {',
+    '  volume 3',
+    '}',
   ].join('\n')
   const problems = inspect(broken, grammar).diagnostics
   /** @param needle - the text a diagnostic should underline. @returns it, if any. */
@@ -672,17 +792,19 @@ const OPTIONS = { reducedMotion: false }
     const from = broken.indexOf(needle)
     return problems.find((problem) => problem.from === from && problem.to === from + needle.length)
   }
+  /** @param needle - a fragment of the message. @returns the diagnostic, if any. */
+  const byMessage = (needle) => problems.find((problem) => problem.message.includes(needle))
   assert.deepEqual(
-    problems.map((problem) => problem.code).sort(),
-    ['bad-option-value', 'bad-value', 'unknown-option', 'vocabulary:state'],
-    'the document has exactly the four mistakes it was written with',
+    [...new Set(problems.map((problem) => problem.code))].sort(),
+    ['bad-value', 'inert-property', 'unknown-key'],
+    'the document has exactly the three mistakes it was written with',
   )
-  assert.match(at('nonsense')?.message ?? '', /Unknown state "nonsense"/, 'an unknown state is named')
-  assert.match(at('shap')?.message ?? '', /Unknown option "shap"/, 'an unknown option key is named')
-  assert.match(at('circl')?.message ?? '', /not a valid shape/, 'a word that fits no slot is measured against the free one')
+  assert.match(at('circl')?.message ?? '', /not a value "shape" accepts/, 'a bad value is measured against its own property')
   assert.equal(at('circl')?.severity, 'error', 'and it is an error, because the line does not draw what it says')
-  assert.match(at('color=mauve')?.message ?? '', /not a color/, 'a bad option value is reported rather than swallowed')
-  assert.equal(at('color=mauve')?.severity, 'warning', 'as a warning: the shipped default still draws')
+  assert.match(at('nonsense')?.message ?? '', /Unknown setting "nonsense"/, 'an unknown name is named, with the scope’s list')
+  assert.match(byMessage('does nothing in "running"')?.message ?? '', /chime/, 'a chime in a state with no event is reported')
+  assert.equal(byMessage('does nothing in "running"')?.severity, 'warning', 'as a warning: nothing is broken, nothing happens')
+  assert.match(byMessage('outside what "volume" accepts')?.message ?? '', /0 and 1/, 'a range is quoted back')
 
   // ── what can come next ────────────────────────────────────────────────────
   /** @param text - the document. @param caret - where the caret is. @returns the row labels. */
@@ -691,73 +813,148 @@ const OPTIONS = { reducedMotion: false }
     return (result?.rows ?? []).map((row) => row.item.label)
   }
 
-  // An empty line offers the states, in the order the plugin lists them.
-  assert.deepEqual(rowsAt('', 0), plugin.STYLE_STATES, 'the head of a line offers every state')
-  // And the list has to survive the first letter: `runn|` is still the state word, which is
-  // what the engine's `firstWord` predicate exists for.
-  const typing = complete(inspect('runn', grammar), grammar, { text: 'runn', caret: 4, trigger: 'explicit' })
-  assert.deepEqual(typing?.rows.map((row) => row.item.label), ['running'], 'the state stays offered while it is typed')
-  assert.deepEqual(typing?.range, { from: 0, to: 4 }, 'and the range covers what has been typed')
-
-  // After the state word the next slot's values lead, and the keys follow them.
-  const afterState = rowsAt('running ', 8)
-  assert.deepEqual(afterState.slice(0, plugin.SHAPES.length), plugin.SHAPES, 'the free slot is the shape slot')
-  const keyRows = afterState.filter((label) => label.endsWith('='))
-  assert.ok(keyRows.length > 0, 'and the option keys are offered after the values')
-  for (const label of keyRows) {
-    assert.ok(
-      plugin.STYLE_OPTIONS.includes(label.slice(0, -1)),
-      `${label} must be a key the parser accepts`,
-    )
+  // An empty line offers the states first — opening a block is the only thing that
+  // can start a document — and then the document settings.
+  const head = rowsAt('', 0)
+  assert.deepEqual(head.slice(0, plugin.STYLE_STATES.length), plugin.STYLE_STATES, 'the head of a line offers every state')
+  for (const key of plugin.STYLE_GLOBAL_KEYS) {
+    assert.ok(head.includes(key), `a document setting (${key}) is offered at the top level`)
   }
-  // Filling the shape moves the list on to the colour slot.
+  // And the list has to survive the first letter: `wai|` is still the state word.
+  assert.deepEqual(rowsAt('wai', 3), ['waiting'], 'the state stays offered while it is typed')
+
+  // Accepting a state writes the brace, because that is the part of the syntax a
+  // user has to remember and the editor can do it for them.
+  const headRows = complete(inspect('', grammar), grammar, { text: '', caret: 0, trigger: 'explicit' }).rows
+  assert.equal(headRows.find((row) => row.item.label === 'waiting')?.item.append, ' {')
+
+  // Inside a block, the list is that block's properties — and closing it is one of
+  // the choices, because a document that never closes a block is an error the reader
+  // has to report.
+  const inside = rowsAt('waiting {\n  ', 12)
+  for (const key of plugin.STYLE_STATE_KEYS) assert.ok(inside.includes(key), `a block property (${key}) is offered inside one`)
+  assert.ok(inside.includes('}'), 'and closing the block is offered')
+  assert.ok(!inside.includes('icon'), 'a document setting is not offered inside a block')
+
+  // After a property, the list is that property's values and nothing else.
+  assert.deepEqual(rowsAt('waiting {\n  shape ', 18), plugin.SHAPES, 'a shape value leads with the shapes')
+  assert.deepEqual(rowsAt('icon ', 5), ['on', 'off'], 'a channel takes on or off')
+  assert.deepEqual(rowsAt('sound ', 6), ['off', 'background', 'always'], 'and sound takes its three modes')
+  const chimeRows = rowsAt('waiting {\n  chime ', 18)
+  assert.ok(chimeRows.includes('A5'), 'the chime list offers notes')
+  assert.equal(chimeRows.at(-1), 'off', 'and the way to silence this state alone')
+  assert.ok(rowsAt('keep-done ', 10).length > 0, 'and a duration offers the values worth reaching for')
+
+  // ── what accepting a row actually replaces ────────────────────────────────
+  //
+  // The range must be the value token the caret is in, not what `wordChars` thinks a
+  // word is. `wordChars` has no dot — deliberately, so a stray `circle.` is not read as
+  // one unknown word — so the word around the caret in `volume 0.2` is just `2`, and
+  // accepting `0.25` there wrote `0.0.25`: the prefix the lexical layer could not see
+  // stayed behind. These assertions apply the edit the editor would apply and then read
+  // the result with the plugin's own reader, which is the only way to catch it.
+  /** @param text - the document. @param caret - where the caret is. @param label - the row to accept. */
+  const accept = (text, caret, label) => {
+    const result = complete(inspect(text, grammar), grammar, { text, caret, trigger: 'explicit' })
+    const row = (result?.rows ?? []).find((entry) => entry.item.label === label)
+    assert.ok(row !== undefined, `${label} must be offered at ${caret}`)
+    return {
+      range: result.range,
+      text: `${text.slice(0, result.range.from)}${row.item.insert ?? row.item.label}${row.item.append ?? ''}${text.slice(result.range.to)}`,
+    }
+  }
+
+  const volumeText = 'done {\n  volume 0.2\n}'
+  const volumeStart = volumeText.indexOf('0.2')
+  const volumeCaret = volumeStart + '0.2'.length
+  const accepted = accept(volumeText, volumeCaret, '0.25')
   assert.deepEqual(
-    rowsAt('running circle ', 15).slice(0, Object.keys(plugin.PRESET_COLORS).length),
-    Object.keys(plugin.PRESET_COLORS),
-    'the slot after a shape is the colour slot',
+    accepted.range,
+    { from: volumeStart, to: volumeCaret },
+    'the range must cover the whole value token, dot and all',
   )
+  assert.equal(
+    plugin.resolveStyle(accepted.text).problems.length,
+    0,
+    `accepting 0.25 must leave a document the reader understands (got ${JSON.stringify(accepted.text)})`,
+  )
+  assert.equal(plugin.resolveStyle(accepted.text).sound.channels.done.gain, 0.25, 'and the state it names at 0.25')
+
+  // The list is filtered by that same token: after `0.` the numbers that begin with it,
+  // and not the whole suggestion list. That is `wordChars` doing the filtering, so a dot
+  // outside the word would leave the caret in no word at all and offer `1` for a value
+  // that starts `0.`.
+  const dotted = rowsAt('done {\n  volume 0.', 'done {\n  volume 0.'.length)
+  assert.ok(dotted.includes('0.25'), 'the numbers that begin with what is typed are offered')
+  assert.ok(!dotted.includes('1'), 'and the ones that do not begin with it are not')
+
+  // A duration is the same shape of token: `1.5s` is one value, dot and unit and all,
+  // and accepting the row that is already there must leave the document alone rather
+  // than write `1.1.5s`.
+  const speedText = 'running {\n  speed 1.5s\n}'
+  const speedStart = speedText.indexOf('1.5s')
+  const speedAccepted = accept(speedText, speedStart + '1.5s'.length, '1.5s')
+  assert.deepEqual(speedAccepted.range, { from: speedStart, to: speedStart + '1.5s'.length })
+  assert.ok(!speedAccepted.text.includes('1.1.5s'), 'the prefix must not survive the replacement')
+  assert.deepEqual(plugin.resolveStyle(speedAccepted.text).problems, [], 'and the line still reads')
+  assert.equal(plugin.resolveStyle(speedAccepted.text).look.running.speed, 1.5)
+
+  // A caret in the whitespace after a value is in no token at all, so the next value is
+  // a new one rather than a replacement — which is how a second chime note is written.
+  const notesText = 'waiting {\n  chime A5 \n}'
+  const notesCaret = notesText.indexOf('A5 ') + 'A5 '.length
+  const noteAccepted = accept(notesText, notesCaret, 'E6')
+  assert.deepEqual(noteAccepted.range, { from: notesCaret, to: notesCaret })
+  assert.equal(plugin.resolveStyle(noteAccepted.text).sound.channels.waiting.labels.join(' '), 'A5 E6')
 
   // ── the vocabularies are the plugin's, not a copy ─────────────────────────
   // The proof that the grammar reads the constants rather than carrying its own: replace one
   // and the grammar follows. A second copy would go on accepting the shipped words.
   const overridden = plugin.dshSentryStyleGrammar({
     states: ['idle'],
+    keys: { global: ['sound'], state: ['shape'] },
+    spec: { shape: { kind: 'word', words: ['blob'] } },
     shapes: ['blob'],
+    motions: plugin.MOTIONS,
     colors: { teal: '#008080' },
-    motions: plugin.MOTIONS_LIST,
-    patterns: plugin.PATTERNS,
-    options: plugin.STYLE_OPTIONS,
-    defaults: plugin.DEFAULT_LOOK,
+    modes: plugin.MODES,
+    notes: [],
+    defaults: {},
   })
-  assert.deepEqual(inspect('idle blob', overridden).diagnostics, [], 'a replaced vocabulary accepts what it names')
+  assert.deepEqual(
+    inspect('idle {\n  shape blob\n}', overridden).diagnostics,
+    [],
+    'a replaced vocabulary accepts what it names',
+  )
   assert.equal(
-    scan('idle blob', overridden).tokens.find((token) => token.text === 'blob')?.scope,
+    scan('idle {\n  shape blob\n}', overridden).tokens.find((token) => token.text === 'blob')?.scope,
     'value.shape',
     'and paints it as a shape',
   )
   assert.equal(
-    inspect('running blob', overridden).diagnostics.find((problem) => problem.code === 'vocabulary:state')?.from,
+    inspect('running {', overridden).diagnostics.find((problem) => problem.code === 'vocabulary:state')?.from,
     0,
     'a state the vocabulary no longer names is rejected at its own word',
   )
   assert.match(
-    inspect('idle circle', overridden).diagnostics.find((problem) => problem.code === 'bad-value')?.message ?? '',
+    inspect('idle {\n  shape circle\n}', overridden).diagnostics.find(
+      (problem) => problem.code === 'bad-value',
+    )?.message ?? '',
     /blob/,
     'a shape it no longer ships is measured against the words that replaced it',
   )
-  assert.deepEqual(inspect('idle blob color=teal', overridden).diagnostics, [], 'a replaced palette entry is accepted')
-  assert.equal(
-    inspect('idle blob color=blue', overridden).diagnostics.find(
-      (problem) => problem.code === 'bad-option-value',
-    )?.severity,
-    'warning',
-    'and a colour it no longer names is reported',
+  assert.match(
+    inspect('idle {\n  colour teal\n}', overridden).diagnostics.find(
+      (problem) => problem.code === 'unknown-key',
+    )?.message ?? '',
+    /shape/,
+    'and a property it no longer accepts is measured against the ones it does',
   )
   // The converse, so the assertions above cannot pass by accident: the shipped grammar knows
-  // `running`, `circle`, and `blue`, and has never heard of `idle`.
-  assert.deepEqual(inspect('running circle blue', grammar).diagnostics, [], 'the shipped grammar accepts its own words')
+  // `waiting` and `circle`, and has never heard of `idle`.
+  assert.deepEqual(inspect('waiting {\n  shape circle\n}', grammar).diagnostics, [], 'the shipped grammar accepts its own words')
   assert.equal(
-    inspect('idle circle', grammar).diagnostics.find((problem) => problem.code === 'vocabulary:state')?.from,
+    inspect('idle {', grammar).diagnostics.find((problem) => problem.code === 'vocabulary:state')?.from,
     0,
     'and rejects the words that replaced them',
   )
@@ -870,65 +1067,113 @@ const ALERTS = {
 }
 const BACKGROUND = { now: 10_000, lastSoundAt: undefined, hidden: true, focused: false }
 const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused: true }
+/** The chime configuration the shipped document resolves to. */
+const SHIPPED_SOUND = plugin.resolveStyle(plugin.DEFAULT_STYLE).sound
 
 {
-  const settings = plugin.resolveSettings(undefined)
-  assert.equal(plugin.soundPlan(ALERTS, settings, BACKGROUND), 'questions', 'a question is the loudest thing')
-  assert.equal(plugin.soundPlan(ALERTS, settings, FOREGROUND), undefined, 'foreground is silence')
+  const picked = plugin.soundPlan(ALERTS, SHIPPED_SOUND, BACKGROUND)
+  assert.equal(picked?.channel, 'waiting', 'a question is the loudest thing')
+  assert.deepEqual(
+    picked.frequencies,
+    SHIPPED_SOUND.channels.waiting.frequencies,
+    'and what plays is what the document asked for',
+  )
+  assert.equal(picked.gain, SHIPPED_SOUND.channels.waiting.gain, 'at the loudness the document resolved to')
+  assert.equal(plugin.soundPlan(ALERTS, SHIPPED_SOUND, FOREGROUND), undefined, 'foreground is silence')
   assert.equal(
-    plugin.soundPlan(ALERTS, { ...settings, soundBlocked: false }, FOREGROUND),
-    'questions',
-    'the user can opt out of the foreground rule',
+    plugin.soundPlan(ALERTS, { ...SHIPPED_SOUND, when: 'always' }, FOREGROUND)?.channel,
+    'waiting',
+    'and the document can opt out of that rule',
+  )
+  assert.equal(
+    plugin.soundPlan(ALERTS, { ...SHIPPED_SOUND, when: 'off' }, BACKGROUND),
+    undefined,
+    'or silence sound entirely',
   )
   // A blurred window counts as background even when the document is visible.
-  assert.equal(plugin.soundPlan(ALERTS, settings, { ...BACKGROUND, hidden: false, focused: false }), 'questions')
+  assert.equal(plugin.soundPlan(ALERTS, SHIPPED_SOUND, { ...BACKGROUND, hidden: false, focused: false })?.channel, 'waiting')
 
-  assert.equal(plugin.soundPlan(ALERTS, { ...settings, sound: false }, BACKGROUND), undefined, 'the master switch is master')
-  assert.equal(plugin.soundPlan(ALERTS, { ...settings, soundWaiting: false }, BACKGROUND), 'approvals', 'the question chime can be off on its own')
+  // A state whose chime is off is skipped rather than silencing the rest: an approval
+  // that arrives in the same burst still has its own sound.
+  const withoutWaiting = {
+    ...SHIPPED_SOUND,
+    channels: { ...SHIPPED_SOUND.channels, waiting: undefined },
+  }
+  assert.equal(plugin.soundPlan(ALERTS, withoutWaiting, BACKGROUND)?.channel, 'approval')
+  const onlyDone = { ...SHIPPED_SOUND, channels: { done: SHIPPED_SOUND.channels.done } }
   assert.equal(
-    plugin.soundPlan(ALERTS, { ...settings, soundWaiting: false, soundApproval: false }, BACKGROUND),
-    'completed',
+    plugin.soundPlan(ALERTS, onlyDone, BACKGROUND)?.channel,
+    'done',
     'with both human-action chimes off, the completion chime is what is left',
   )
   assert.equal(
-    plugin.soundPlan(
-      ALERTS,
-      { ...settings, soundWaiting: false, soundApproval: false, soundDone: false },
-      BACKGROUND,
-    ),
+    plugin.soundPlan(ALERTS, { ...SHIPPED_SOUND, channels: {} }, BACKGROUND),
     undefined,
-    'and with every per-event switch off, silence',
+    'and with every chime off, silence',
   )
 
   const quiet = { questions: [], approvals: [], completed: ['c'] }
-  assert.equal(plugin.soundPlan(quiet, settings, BACKGROUND), 'completed', 'a completion chimes by default')
-  assert.equal(plugin.soundPlan(quiet, { ...settings, soundDone: false }, BACKGROUND), undefined, 'and can be turned off on its own')
+  assert.equal(plugin.soundPlan(quiet, SHIPPED_SOUND, BACKGROUND)?.channel, 'done', 'a completion chimes by default')
 
   // One sound per burst: three questions in three seconds must not be three chimes.
+  // The gap is the document's, so both the shipped value and a document that changed
+  // it are checked here.
   assert.equal(
-    plugin.soundPlan(ALERTS, settings, { ...BACKGROUND, lastSoundAt: 9_000 }),
+    plugin.soundPlan(ALERTS, SHIPPED_SOUND, { ...BACKGROUND, lastSoundAt: 9_000 }),
     undefined,
     'the gap suppresses a second chime',
   )
   assert.equal(
-    plugin.soundPlan(ALERTS, settings, { ...BACKGROUND, lastSoundAt: 10_000 - plugin.SOUND_GAP_MS }),
-    'questions',
+    plugin.soundPlan(ALERTS, SHIPPED_SOUND, { ...BACKGROUND, lastSoundAt: 10_000 - SHIPPED_SOUND.gapMs })?.channel,
+    'waiting',
     'and expires exactly at the gap',
   )
+  const patient = plugin.resolveStyle('chime-gap 3s').sound
+  assert.equal(patient.gapMs, 3_000)
+  assert.equal(
+    plugin.soundPlan(ALERTS, patient, { ...BACKGROUND, lastSoundAt: 8_000 }),
+    undefined,
+    'a longer gap holds a chime back',
+  )
+  assert.equal(plugin.soundPlan(ALERTS, patient, { ...BACKGROUND, lastSoundAt: 6_000 })?.channel, 'waiting')
 }
 
 {
-  // The chime table is the plugin's audible identity: a rising two-note question,
+  // The shipped chimes are the plugin's audible identity: a rising two-note question,
   // one note for an approval, one soft low note for a completion.
-  assert.equal(plugin.CHIME_NOTES.questions.length, 2)
-  assert.ok(plugin.CHIME_NOTES.questions[1].frequency > plugin.CHIME_NOTES.questions[0].frequency)
-  assert.ok(plugin.CHIME_NOTES.questions[1].startMs > 0, 'the notes overlap rather than sequence')
-  assert.equal(plugin.CHIME_NOTES.approvals.length, 1)
-  assert.equal(plugin.CHIME_NOTES.completed.length, 1)
-  assert.ok(
-    plugin.CHIME_NOTES.completed[0].peak < plugin.CHIME_NOTES.questions[0].peak,
-    'a completion is quieter than a question',
+  const channels = SHIPPED_SOUND.channels
+  assert.deepEqual(channels.waiting.labels, ['A5', 'E6'], 'a question rises a fifth')
+  assert.ok(channels.waiting.frequencies[1] > channels.waiting.frequencies[0])
+  assert.deepEqual(channels.approval.labels, ['A5'])
+  assert.deepEqual(channels.done.labels, ['A4'], 'a completion is the same note an octave down')
+  assert.ok(channels.done.gain < channels.waiting.gain, 'and quieter than a question')
+  assert.ok(channels.done.gain < channels.approval.gain, 'and quieter than an approval')
+
+  // Loudness is one number per state, so what the card prints is what plays: the
+  // shipped document's three numbers, and nothing derived from a second setting.
+  assert.equal(channels.waiting.gain, 0.5)
+  assert.equal(channels.approval.gain, 0.45)
+  assert.equal(channels.done.gain, 0.25, 'the completion is quiet because its block says so')
+  assert.equal(
+    plugin.resolveStyle('done {\n  volume 0.1\n}').sound.channels.done.gain,
+    0.1,
+    'and a block that names a loudness plays at exactly that',
   )
+  assert.equal(
+    plugin.resolveStyle('done {\n  volume 0.1\n}').sound.channels.waiting.gain,
+    0.5,
+    'without touching the states beside it',
+  )
+
+  // The notes of one chime are a sequence rather than a chord: the second starts
+  // after the first, which is what makes two notes read as one sound.
+  const notes = plugin.chimeNotes(channels.waiting.frequencies)
+  assert.equal(notes.length, 2)
+  assert.equal(notes[0].startMs, 0)
+  assert.equal(notes[1].startMs, plugin.CHIME_STAGGER_MS)
+  assert.equal(notes[0].durationMs, plugin.CHIME_NOTE_MS)
+  assert.ok(plugin.CHIME_STAGGER_MS < plugin.CHIME_NOTE_MS, 'so the two notes overlap rather than sequence')
+  assert.deepEqual(plugin.chimeNotes([]), [], 'no notes is no sound')
 }
 
 {
@@ -981,9 +1226,12 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
     AudioContextClass: function AudioContext() {
       return suspended.context
     },
-    volume: 0.5,
   })
-  assert.equal(blocked.play('questions'), false, 'a suspended context cannot sound, and the note is dropped')
+  assert.equal(
+    blocked.play(SHIPPED_SOUND.channels.waiting.frequencies, 0.5),
+    false,
+    'a suspended context cannot sound, and the chime is dropped',
+  )
   assert.ok(suspended.counts().resumed >= 1, 'and the player asks for a resume rather than giving up silently')
   assert.equal(suspended.scheduled.length, 0, 'nothing may be queued for a context that cannot play')
 
@@ -992,30 +1240,30 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
     AudioContextClass: function AudioContext() {
       return running.context
     },
-    volume: 0.25,
   })
-  assert.equal(player.play('questions'), true)
+  assert.equal(player.play(SHIPPED_SOUND.channels.waiting.frequencies, 0.25), true)
   const starts = running.scheduled.filter((entry) => entry[0] === 'start')
   assert.equal(starts.length, 2, 'a two-note chime schedules two notes')
   assert.ok(
-    Math.abs(starts[1][1] - starts[0][1] - 0.095) < 0.001,
-    `the second note is offset by the note table (${String(starts[1][1] - starts[0][1])})`,
+    Math.abs(starts[1][1] - starts[0][1] - plugin.CHIME_STAGGER_MS / 1000) < 0.001,
+    `the second note is offset by the chime's own stagger (${String(starts[1][1] - starts[0][1])})`,
   )
   const attack = running.scheduled.find((entry) => entry[0] === 'attack')
-  assert.equal(attack[1], 1 * 0.25, 'the volume setting scales the peak')
-  assert.equal(player.play('completed'), true)
+  assert.equal(attack[1], 0.25, 'the gain is the loudness the caller asked for')
+  assert.equal(player.play(SHIPPED_SOUND.channels.done.frequencies, 0.1), true)
   assert.equal(
     running.scheduled.filter((entry) => entry[0] === 'attack').at(-1)[1],
-    0.45 * 0.25,
-    'a completion is quieter than a question',
+    0.1,
+    'and a quieter state plays quieter',
   )
-  assert.equal(player.play('nonsense'), false, 'an unknown kind schedules nothing')
+  assert.equal(player.play([], 0.5), false, 'an empty note list schedules nothing')
+  assert.equal(player.play(undefined, 0.5), false, 'and so does no note list at all')
   player.dispose()
   assert.equal(running.counts().closed, 1)
 
   // No Web Audio at all: the plugin degrades to the visual channels, silently.
-  const silent = plugin.createChime({ AudioContextClass: undefined, volume: 0.5 })
-  assert.equal(silent.play('questions'), false)
+  const silent = plugin.createChime({ AudioContextClass: undefined })
+  assert.equal(silent.play([880], 0.5), false)
   silent.resume()
   silent.dispose()
 }
@@ -1058,25 +1306,24 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
 // ── the settings ────────────────────────────────────────────────────────────
 {
   const defaults = plugin.resolveSettings(undefined)
-  assert.equal(defaults.soundDone, true, 'every channel is on out of the box')
-  assert.equal(defaults.soundBlocked, true, 'the foreground rule is the default')
+  assert.deepEqual(Object.keys(defaults), ['style'], 'the document is the whole of the plugin’s configuration')
+  assert.equal(defaults.style, plugin.DEFAULT_STYLE)
   assert.equal('fishScale' in defaults, false, 'the fish is full size now; there is no size to set')
+  assert.equal('volume' in defaults, false, 'the volume is a line of the document now, not a setting beside it')
 
-  // Coercion is forgiving on type and strict on range: a typo in settings.yaml
-  // should shrink the volume, not disable the chime.
-  assert.equal(plugin.resolveSettings({ volume: 4 }).volume, 1)
-  assert.equal(plugin.resolveSettings({ volume: -1 }).volume, 0)
-  assert.equal(plugin.resolveSettings({ doneWindowMs: -5 }).doneWindowMs, 0)
-  assert.equal(plugin.resolveSettings({ doneWindowMs: 'nonsense' }).doneWindowMs, 60_000)
-  assert.equal(plugin.resolveSettings({ sound: 'yes' }).sound, true, 'an unusable value falls back to the default')
-  assert.equal(plugin.resolveSettings({ favicon: false }).favicon, false)
+  // Coercion survives a hand-edited document: a field that is not a document at all
+  // falls back to the shipped one rather than reaching the reader.
+  assert.equal(plugin.resolveSettings({ style: 42 }).style, plugin.DEFAULT_STYLE)
+  assert.equal(plugin.resolveSettings({ style: '   ' }).style, plugin.DEFAULT_STYLE)
+  assert.equal(plugin.resolveSettings({ style: 'icon off' }).style, 'icon off')
   assert.deepEqual(plugin.resolveSettings(null), defaults)
+  assert.deepEqual(plugin.resolveSettings({ nonsense: 1 }), defaults, 'a key that is not a setting changes nothing')
 }
 
 {
   // The two halves are separate bundles and cannot share a module, so the field
   // list is duplicated by hand. Comparing them here is what turns a silent drift
-  // — a switch that writes a key no engine reads — into a failing check.
+  // — a field the row writes and the schema does not hold — into a failing check.
   const clientFields = plugin.SETTINGS.map((field) => field.id)
   const hostSource = readFileSync(join(root, 'lib', 'index.js'), 'utf8')
   const declared = /const ALERT_FIELDS = \[([^\]]*)\]/.exec(hostSource)?.[1]
@@ -1091,15 +1338,18 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
     assert.equal(plugin.SETTING_DEFAULTS[field.id], field.default)
   }
 
-  // The appearance document is duplicated across the two halves for the same reason
-  // the field roster is, so the copies must agree. A default changed on one side
-  // only would render one appearance in the row and read another in the engine.
+  // The document is duplicated across the two halves for the same reason the field
+  // roster is, so the copies must agree: a default changed on one side only would
+  // render one document in the row and run another in the engine.
   const hostStyle = /export const DEFAULT_STYLE_DOCUMENT = \[([\s\S]*?)\]\.join\('\\n'\)/.exec(
     readFileSync(join(root, 'lib', 'index.js'), 'utf8'),
   )?.[1]
   assert.ok(hostStyle !== undefined, 'the host half must declare DEFAULT_STYLE_DOCUMENT')
   const hostStyleText = [...hostStyle.matchAll(/'([^']*)'/g)].map((match) => match[1]).join('\n')
-  assert.equal(hostStyleText, plugin.DEFAULT_STYLE, 'both halves must ship the same style document')
+  assert.equal(hostStyleText, plugin.DEFAULT_STYLE, 'both halves must ship the same document')
+  // And the shipped document must be one the reader is happy with, or every fresh
+  // install would greet its user with a diagnostics list.
+  assert.deepEqual(plugin.resolveStyle(hostStyleText).problems, [], 'the shipped document must read cleanly')
 
   // The defaults must agree *by value*, not merely by the presence of a literal:
   // a fresh install would otherwise render one value and enforce another. The
@@ -1114,13 +1364,10 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
     )
   } catch (error) {
     if (!String(error).includes('Cannot find package')) throw error
-    for (const [field, value] of Object.entries(plugin.SETTING_DEFAULTS)) {
-      assert.ok(
-        hostSource.includes(`default(${String(value)})`) ||
-          hostSource.includes(`default(${String(value).replace('.', '.')})`),
-        `${field}: the host schema must default ${String(value)} (checked by source, dependencies absent)`,
-      )
-    }
+    assert.ok(
+      hostSource.includes('z.string().default(DEFAULT_STYLE_DOCUMENT)'),
+      'the host schema must default the shipped document (checked by source, dependencies absent)',
+    )
   }
 }
 
@@ -1141,34 +1388,33 @@ function collectElements(node, out = []) {
 }
 
 /**
- * Every switch the row renders.
+ * Every element of one class inside a tree, including a component rendered at its
+ * own level.
  *
- * The React stub does not render function components, so a `SettingSwitch` stays
- * an unresolved element in the row's tree; rendering it at its own level with the
- * props the row passed down is exactly what a real browser does, and it keeps the
- * assertion on the component that owns the switch.
+ * The React stub does not render function components, so `SettingText` and
+ * `StatePreviews` stay unresolved elements in the row's tree; rendering one at its
+ * own level with the props the row passed down is exactly what a real browser does,
+ * and it keeps each assertion on the component that owns the thing being asserted.
  * @param tree - the row's rendered tree.
- * @returns the switch buttons, in order.
+ * @param name - the component's function name.
+ * @returns the elements the component renders.
  */
-function switchButtons(tree) {
+function rendered(tree, name) {
   return collectElements(tree)
-    .filter((element) => typeof element.type === 'function' && element.type.name === 'SettingSwitch')
-    .flatMap((element) => collectElements(element.type(element.props)))
-    .filter((element) => element.props?.role === 'switch')
+    .filter((element) => typeof element.type === 'function' && element.type.name === name)
+    .map((element) => element.type(element.props))
 }
 
-/** Every range input the row renders. */
-function rangeInputs(tree) {
-  return collectElements(tree)
-    .filter((element) => typeof element.type === 'function' && element.type.name === 'SettingNumber')
-    .flatMap((element) => collectElements(element.type(element.props)))
-    .filter((element) => element.props?.type === 'range')
+/** Every element of one class name in a tree. */
+function byClass(tree, className) {
+  return collectElements(tree).filter((element) => element.props?.className === className)
 }
 
 {
   const writes = []
+  const auditions = []
+  const shownInTab = []
   let resets = 0
-  let previews = 0
   const settings = plugin.resolveSettings(undefined)
   const tree = plugin.AlertRow({
     t: (key) => key,
@@ -1177,55 +1423,217 @@ function rangeInputs(tree) {
     reset: () => {
       resets += 1
     },
-    preview: () => {
-      previews += 1
-    },
+    audition: (frequencies, gain) => auditions.push([frequencies, gain]),
+    preview: (name) => shownInTab.push(name),
   })
+  const doc = plugin.resolveStyle(plugin.DEFAULT_STYLE)
 
-  const switches = switchButtons(tree)
-  const ranges = rangeInputs(tree)
-  const booleans = plugin.SETTINGS.filter((field) => field.kind === 'boolean')
-  const numbers = plugin.SETTINGS.filter((field) => field.kind === 'number')
-  assert.equal(switches.length, booleans.length, 'one switch per boolean setting')
-  assert.equal(ranges.length, numbers.length, 'one range per numeric setting')
+  // The row is the document editor, the previews, and a reset — and no switches:
+  // every knob the row used to carry is a line of the document now, which is the
+  // whole point of folding them in.
+  assert.equal(byClass(tree, 'dsh-sentry-switch').length, 0, 'the row carries no switches')
+  assert.equal(
+    collectElements(tree).filter((element) => element.props?.type === 'range').length,
+    0,
+    'and no sliders',
+  )
 
-  assert.equal(switches[0].props['aria-checked'], true)
-  assert.equal(switches[0].props['aria-label'], 'alert.setting.favicon')
-  switches[0].props.onClick()
-  assert.deepEqual(writes.at(-1), ['favicon', false], 'the switch writes its own field id')
+  // ── the previews ──────────────────────────────────────────────────────────
+  // The strip is a component of its own, so it is rendered at its own level the way
+  // the stub makes necessary — and the tick it drives is the shipped `TICK_MS`.
+  const previews = rendered(tree, 'StatePreviews')
+  const cards = byClass(previews, 'dsh-sentry-preview')
+  assert.equal(cards.length, plugin.STYLE_STATES.length, 'one preview per state')
+  const icons = cards.map((card) => byClass(card, 'dsh-sentry-previewIcon')[0])
+  for (const [index, state] of plugin.STYLE_STATES.entries()) {
+    const expected = plugin.faviconHref(
+      plugin.sentryFavicon(plugin.previewPlan(state), {
+        reducedMotion: false,
+        style: doc.look,
+        motion: plugin.motionTick(doc.look[state], 0),
+      }),
+    )
+    assert.equal(icons[index].props.src, expected, `${state} must be previewed exactly as the tab draws it`)
+    assert.equal(icons[index].props.width, 32, 'at the size the tab draws it')
+    assert.equal(icons[index].props.alt, `alert.status.${state}`)
+  }
+  assert.equal(
+    new Set(icons.map((icon) => icon.props.src)).size,
+    plugin.STYLE_STATES.length,
+    'and the four states are four different pictures',
+  )
 
-  // Every switch must render the resolved default, or the row would lie about it.
-  for (const [index, field] of booleans.entries()) {
-    assert.equal(
-      switches[index].props['aria-checked'],
-      plugin.SETTING_DEFAULTS[field.id],
-      `${field.id} must render its default`,
+  // The sound line and the button describe and play the same chime: the notes the
+  // document named, at the loudness it resolved to.
+  const sounds = byClass(previews, 'dsh-sentry-previewSound').map((element) => element.children.join(''))
+  assert.ok(sounds.some((text) => text.includes('A5')), 'the waiting card names its notes')
+  assert.ok(sounds.some((text) => text.includes('50%')), 'and the loudness that will come out')
+  assert.ok(sounds.some((text) => text.includes('alert.preview.silent')), 'a state with no chime says so')
+  // Every percentage the strip prints is a number the document contains. That is the
+  // rule this shape of the document exists to keep: a card that printed the product of
+  // two settings showed a figure its reader could not find anywhere.
+  for (const text of sounds) {
+    const percent = /(\d+)%/.exec(text)
+    if (percent === null) continue
+    assert.ok(
+      plugin.DEFAULT_STYLE.includes(`volume ${String(Number(percent[1]) / 100)}`),
+      `${text} must come from a line of the document`,
     )
   }
-  const doneIndex = booleans.findIndex((field) => field.id === 'soundDone')
-  switches[doneIndex].props.onClick()
-  assert.deepEqual(writes.at(-1), ['soundDone', false], 'a switch toggles away from its default')
+  // And the one case where it does not — a block that never wrote one — is marked as
+  // the default rather than left looking like another unexplained figure.
+  const sparse = rendered(
+    plugin.AlertRow({
+      t: (key) => key,
+      useStore: (selector) => selector({ ...settings, style: 'waiting {\n  chime A5\n}', revision: 1 }),
+      setField: () => undefined,
+      reset: () => undefined,
+      audition: () => undefined,
+      preview: () => undefined,
+    }),
+    'StatePreviews',
+  )
+  assert.ok(
+    byClass(sparse, 'dsh-sentry-previewSound')[0].children.join('').includes('alert.preview.fallback'),
+    'a loudness the document never states is printed as the default',
+  )
+  const buttons = byClass(previews, 'dsh-sentry-audition')
+  assert.equal(buttons.length, Object.keys(doc.sound.channels).length, 'only a chimed state offers a button')
+  buttons[0].props.onClick()
+  assert.equal(auditions.length, 1)
+  assert.deepEqual(auditions[0][0], doc.sound.channels.waiting.frequencies)
+  assert.equal(auditions[0][1], doc.sound.channels.waiting.gain)
 
-  // Ranges carry their bounds, so the row cannot offer a value the schema rejects.
-  const volume = numbers.findIndex((field) => field.id === 'volume')
-  assert.equal(ranges[volume].props.min, 0)
-  assert.equal(ranges[volume].props.max, 1)
-  assert.equal(ranges[volume].props.value, 0.5)
-  ranges[volume].props.onChange({ target: { value: '0.75' } })
-  assert.deepEqual(writes.at(-1), ['volume', 0.75])
-  const window_ = numbers.findIndex((field) => field.id === 'doneWindowMs')
-  assert.equal(ranges[window_].props.min, 0)
-  assert.equal(ranges[window_].props.max, 300_000)
+  // ── showing a state in the tab ────────────────────────────────────────────
+  // The card is a 32-pixel picture in a settings page; the button beside it puts the
+  // same state into the *real tab*, which is the only way to judge an edit to a state
+  // no session happens to be in. Every state can be shown, including the two with no
+  // chime — this is about appearance.
+  const pinButtons = byClass(previews, 'dsh-sentry-pin')
+  assert.equal(pinButtons.length, plugin.STYLE_STATES.length, 'every state can be shown in the tab')
+  assert.equal(
+    pinButtons.every((button) => button.props['aria-pressed'] === false),
+    true,
+    'and none of them starts pressed',
+  )
+  pinButtons[0].props.onClick()
+  assert.deepEqual(shownInTab, [plugin.STYLE_STATES[0]], 'the first card asks the tab for its own state')
 
-  const preview = collectElements(tree).find((element) => element.props?.className === 'dsh-sentry-preview')
-  assert.ok(preview !== undefined, 'the row must offer a preview')
-  preview.props.onClick()
-  assert.equal(previews, 1)
+  // The toggle, driven through `mount` because the pinned card lives in the
+  // component's own hook state and the stub only re-renders when the caller asks it to.
+  const { render: renderStrip } = mount()
+  const pinnedCalls = []
+  const stripProps = {
+    t: (key) => key,
+    doc,
+    audition: () => undefined,
+    preview: (name) => pinnedCalls.push(name),
+  }
+  const first = renderStrip(plugin.StatePreviews, stripProps)
+  assert.equal(
+    byClass(first, 'dsh-sentry-pin')[0].props.title,
+    'alert.preview.pinHint',
+    'an unpinned card explains what the button does',
+  )
+  byClass(first, 'dsh-sentry-pin')[0].props.onClick()
+  assert.deepEqual(pinnedCalls, [plugin.STYLE_STATES[0]], 'clicking asks the tab for that state')
+  const second = renderStrip(plugin.StatePreviews, stripProps)
+  assert.equal(
+    byClass(second, 'dsh-sentry-pin')[0].props['aria-pressed'],
+    true,
+    'the card marks itself as the one the tab is showing',
+  )
+  assert.equal(
+    byClass(second, 'dsh-sentry-pin')[0].props.title,
+    'alert.preview.pinnedHint',
+    'and says how to stop',
+  )
+  assert.equal(
+    byClass(second, 'dsh-sentry-preview')[0].props['data-pinned'],
+    true,
+    'and the card it belongs to is the marked one',
+  )
+  assert.equal(
+    byClass(second, 'dsh-sentry-preview')[1].props['data-pinned'],
+    false,
+    'while the others are not',
+  )
+  byClass(second, 'dsh-sentry-pin')[0].props.onClick()
+  assert.deepEqual(
+    pinnedCalls,
+    [plugin.STYLE_STATES[0], undefined],
+    'clicking it again takes the tab back to the live state',
+  )
 
-  const reset = collectElements(tree).find((element) => element.props?.className === 'dsh-sentry-reset')
+  // ── the editor ────────────────────────────────────────────────────────────
+  const editor = collectElements(tree).find(
+    (element) => typeof element.type === 'function' && element.type.name === 'SettingText',
+  )
+  assert.equal(editor.props.value, plugin.DEFAULT_STYLE, 'the editor holds the whole document')
+  assert.equal(editor.props.problems.length, 0, 'and a clean document has nothing to report')
+  editor.props.onChange('icon off')
+  assert.deepEqual(writes.at(-1), ['style', 'icon off'], 'and writes it as one field')
+
+  const reset = byClass(tree, 'dsh-sentry-reset')[0]
   assert.ok(reset !== undefined, 'the row must offer a reset')
   reset.props.onClick()
   assert.equal(resets, 1)
+}
+
+{
+  // A document with a mistake in it is reported on the row rather than drawn
+  // silently: the editor underlines it while typing, and this list is the version
+  // that survives a document pasted into `settings.yaml` and never opened in the
+  // editor at all.
+  const settings = plugin.resolveSettings(undefined)
+  const broken = 'waiting {\n  shape circl\n}'
+  const tree = plugin.AlertRow({
+    t: (key) => key,
+    useStore: (selector) => selector({ ...settings, style: broken, revision: 1 }),
+    setField: () => undefined,
+    reset: () => undefined,
+    audition: () => undefined,
+  })
+  const editor = collectElements(tree).find(
+    (element) => typeof element.type === 'function' && element.type.name === 'SettingText',
+  )
+  assert.equal(editor.props.problems.length, 1, 'the reader’s problems reach the editor block')
+  assert.equal(editor.props.problems[0].line, 1, 'with the line they are on')
+  const listed = byClass(editor.type(editor.props), 'dsh-sentry-problem')
+  assert.equal(listed.length, 1, 'and are printed under the editor')
+  assert.ok(
+    collectElements(listed[0]).some(
+      (element) => typeof element.children?.[0] === 'string' && element.children[0].includes('circl'),
+    ),
+    'the message names the word that is wrong',
+  )
+  assert.ok(
+    byClass(editor.type(editor.props), 'dsh-sentry-problemLine')[0].children.join('') === '2',
+    'and the line number is the one the user sees in the document',
+  )
+
+  // A document wrong on every line is summarised rather than reproduced: the list
+  // exists to point at the mistakes worth fixing, and a hundred rows of complaint
+  // would push the rest of the settings page off the screen.
+  const many = Array.from({ length: 20 }, (_, index) => `nonsense ${String(index)}`).join('\n')
+  const noisy = plugin.AlertRow({
+    t: (key) => key,
+    useStore: (selector) => selector({ ...settings, style: many, revision: 1 }),
+    setField: () => undefined,
+    reset: () => undefined,
+    audition: () => undefined,
+  })
+  const noisyEditor = collectElements(noisy).find(
+    (element) => typeof element.type === 'function' && element.type.name === 'SettingText',
+  )
+  const noisyTree = noisyEditor.type(noisyEditor.props)
+  assert.equal(byClass(noisyTree, 'dsh-sentry-problem').length, 6, 'at most six problems are listed')
+  assert.ok(
+    byClass(noisyTree, 'dsh-sentry-problemHead').some((element) =>
+      String(element.children[0]).includes('14'),
+    ),
+    'and the rest are counted rather than listed',
+  )
 }
 
 // ── the style document's field is an editor ─────────────────────────────────
@@ -1242,19 +1650,19 @@ function rangeInputs(tree) {
   const written = []
   const tree = plugin.SettingText({
     label: 'appearance',
-    hint: 'one line per state',
+    hint: 'one property per line',
     value: plugin.DEFAULT_STYLE,
-    help: { summary: 'reference', sections: [{ title: 'syntax', lines: ['state shape colour'] }] },
+    help: { summary: 'reference', problems: 'problems', sections: [{ title: 'syntax', lines: ['waiting {'] }] },
     onChange: (next) => written.push(next),
   })
   const hosts = collectElements(tree).filter(
     (element) => element.props?.className === 'dsh-sentry-editor',
   )
-  assert.equal(hosts.length, 1, 'the style document must render exactly one editor host')
+  assert.equal(hosts.length, 1, 'the document must render exactly one editor host')
   assert.equal(
     collectElements(tree).filter((element) => element.type === 'textarea').length,
     0,
-    'the style document must not render a bare textarea',
+    'the document must not render a bare textarea',
   )
   assert.ok(hosts[0].props.ref !== undefined, 'the editor host must carry the ref the effect mounts into')
   // The reference is not decoration: it is the interface for a language whose vocabulary is
@@ -1264,9 +1672,35 @@ function rangeInputs(tree) {
     1,
     'the reference block must stay',
   )
+  // A document with nothing wrong says nothing: the problem list is for problems,
+  // not for reassurance.
+  assert.equal(
+    collectElements(tree).filter((element) => element.props?.className === 'dsh-sentry-problems').length,
+    0,
+    'a clean document prints no problem list',
+  )
   // Nothing may be written to the setting during render: the editor reports the user's typing
   // from an effect and an event, never as a side effect of drawing.
   assert.deepEqual(written, [], 'rendering the field must not write the setting')
+}
+
+{
+  // The editor grows with the document rather than scrolling inside itself: a box that
+  // scrolls inside a page that scrolls is two scrollbars for one document, and the one
+  // the user is reaching for is the page's. The cap this replaces was smaller than the
+  // document every install ships, which is what made the second bar appear.
+  //
+  // Asserted at the source level, deliberately: the sizing is handed to `createEditor`
+  // from an effect, and this file runs in Node with a stubbed React whose effects do
+  // nothing. The number is still a decision, and the shipped document's own length is
+  // what says how large is large enough.
+  const sizing = /sizing: \{ minRows: (\d+), maxRows: (\d+) \}/.exec(source)
+  assert.ok(sizing !== undefined, 'the row must size the editor explicitly')
+  const shippedLines = plugin.DEFAULT_STYLE.split('\n').length
+  assert.ok(
+    Number(sizing[2]) >= shippedLines,
+    `the editor must show the shipped document (${String(shippedLines)} lines) without a scrollbar of its own`,
+  )
 }
 
 // ── the editor was compiled in, and the shell is not asked for it ───────────
@@ -1506,11 +1940,24 @@ const ctx = {
   const shown = (value) => value.replaceAll('\u200b', '')
   const MARK = '\u200b'
 
-  // The app's own favicon link is never touched, and the engine starts quiet. The
-  // element is created once and kept; what matters is that it is not *mounted*
-  // until there is something to say.
+  /**
+   * The icon links the plugin currently has mounted.
+   *
+   * The engine replaces its element whenever the picture changes — a tab strip follows
+   * the document's *set* of icon links, and a link whose `href` changed in place is not
+   * reliably a change — so the assertions below are about what is in the head *now*
+   * rather than about one element captured earlier.
+   * @returns the mounted elements, in document order.
+   */
+  const mountedIcons = () =>
+    links.filter(
+      (link) => link.getAttribute('data-dsh-sentry-icon') !== undefined && link.parentNode !== null,
+    )
+
+  // The app's own favicon link is never touched, and the engine starts quiet: no icon
+  // is mounted until there is something to say.
   assert.equal(documentStub.title, 'DeepSeek Harness', 'nothing to report leaves the title alone')
-  assert.equal(links.filter((link) => link.parentNode !== null).length, 0, 'and it must not mount an icon')
+  assert.equal(mountedIcons().length, 0, 'and it must not mount an icon')
 
   assert.equal(dictionaries.length, 1)
   assert.equal(dictionaries[0].namespace, 'settings.alert')
@@ -1536,8 +1983,8 @@ const ctx = {
   pendingState = new Map([['s1', { sessionId: 's1', kind: 'question', key: 'k' }]])
   listListener()
 
-  const icon = links.find((link) => link.getAttribute('data-dsh-sentry-icon') !== undefined)
-  assert.ok(icon !== undefined, 'a waiting session must draw the status icon')
+  assert.equal(mountedIcons().length, 1, 'a waiting session must draw exactly one status icon')
+  const icon = mountedIcons()[0]
   assert.equal(icon.rel, 'icon')
   assert.equal(icon.type, 'image/svg+xml')
   assert.equal(icon.parentNode, head, 'the icon is appended to the head')
@@ -1579,15 +2026,10 @@ const ctx = {
   pendingState = new Map()
   sessionState = { ids: [], byId: {} }
   pendingListener()
-  assert.equal(
-    links.filter((link) => link.getAttribute('data-dsh-sentry-icon') !== undefined).length,
-    1,
-    'the element is reused rather than re-appended',
-  )
-  assert.equal(icon.parentNode, null, 'with nothing to report the icon is removed, restoring the app favicon')
+  assert.equal(mountedIcons().length, 0, 'with nothing to report the plugin holds no icon in the head')
   assert.equal(shown(documentStub.title), 'Part one · Part two — DeepSeek Harness', 'and the title prefix comes off')
 
-  // ── the switches ──────────────────────────────────────────────────────────
+  // ── the document ──────────────────────────────────────────────────────────
   //
   // The row binds the actions the registry hands it, and the mounted instance is
   // the only thing the assertions get to observe: `register` replaced the store
@@ -1597,9 +2039,9 @@ const ctx = {
   const actions = options.inject(options.store)
   assert.equal(typeof actions.setField, 'function')
   assert.equal(typeof actions.reset, 'function')
-  assert.equal(typeof actions.preview, 'function')
+  assert.equal(typeof actions.audition, 'function')
   assert.equal(rowBindings.length, 1, 'injecting the entry face syncs the mounted store once')
-  assert.equal(rowBindings[0].state.favicon, true, 'with the resolved settings, not the store defaults')
+  assert.equal(rowBindings[0].state.style, plugin.DEFAULT_STYLE, 'with the resolved document, not the store defaults')
 
   // A fresh instance must not have kept the stale plan: the settings write
   // re-renders from the live subscriptions.
@@ -1607,32 +2049,110 @@ const ctx = {
     ids: ['s1'],
     byId: { s1: { id: 's1', blank: false, running: true, completed: false } },
   }
-  actions.setField('favicon', true)
-  assert.equal(icon.parentNode, head, 'a running session draws the ring again')
+  actions.setField('style', plugin.DEFAULT_STYLE)
+  assert.equal(mountedIcons().length, 1, 'a running session draws the ring again')
 
-  actions.setField('favicon', false)
-  assert.equal(icon.parentNode, null, 'the favicon switch removes the icon immediately')
-  assert.equal(rowBindings.at(-1).state.favicon, false, 'and the mounted store followed the write')
+  // A redraw with different content mounts a *fresh* element. Mutating the `href` of the
+  // one already in the head is what left a configuration edit showing the previous icon:
+  // a tab strip follows the document's set of icon links, so the element has to change.
+  // A redraw that changes nothing must not churn the DOM, and there must never be two
+  // icons of ours in the head — with two, which one the tab shows depends on mount order.
+  const running = mountedIcons()[0]
+  actions.setField('style', plugin.DEFAULT_STYLE.replace('color blue', 'color purple'))
+  assert.equal(mountedIcons().length, 1, 'a redraw must leave exactly one icon of ours mounted')
+  const restyled = mountedIcons()[0]
+  assert.notEqual(restyled, running, 'a changed picture must be a new element, not the old one with a new href')
+  assert.equal(running.parentNode, null, 'and the element it replaces must be out of the document')
+  assert.ok(decodeURIComponent(restyled.href).includes('fill="#8b5cf6"'), 'carrying the colour the document names')
+  actions.setField('style', plugin.DEFAULT_STYLE.replace('color blue', 'color purple'))
+  assert.equal(mountedIcons()[0], restyled, 'and a redraw that changes nothing must not replace it again')
+
+  // `icon off` is a line of the document now, and it takes the plugin's icon away
+  // immediately — exactly what the switch it replaced did.
+  actions.setField('style', plugin.DEFAULT_STYLE.replace('icon on', 'icon off'))
+  assert.equal(mountedIcons().length, 0, 'icon off removes the icon immediately')
+  assert.equal(restyled.parentNode, null, 'the element itself leaves the document')
+  assert.equal(
+    rowBindings.at(-1).state.style.includes('icon off'),
+    true,
+    'and the mounted store followed the write',
+  )
   assert.equal(
     shown(documentStub.title),
     'alert.status.running · Part one · Part two — DeepSeek Harness',
-    'while the title switch is still on',
+    'while the title channel is still on',
   )
 
-  actions.setField('title', false)
-  assert.equal(shown(documentStub.title), 'Part one · Part two — DeepSeek Harness', 'the title switch strips the prefix')
+  // And so is `title off`, which has to *strip* rather than stop writing: leaving
+  // the prefix in the tab would read as a switch that does not work.
+  actions.setField('style', plugin.DEFAULT_STYLE.replace('title on', 'title off'))
+  assert.equal(shown(documentStub.title), 'Part one · Part two — DeepSeek Harness', 'title off strips the prefix')
+  assert.equal(mountedIcons().length, 1, 'while the icon channel comes back with it')
 
-  // The preview must not throw with no Web Audio available.
-  actions.preview()
+  // The audition must not throw with no Web Audio available, and it plays the notes
+  // the card printed beside the button.
+  actions.audition([880, 1318.51], 0.5)
 
-  // Reset clears the stored switches; the defaults bring the visual channels back.
+  // ── showing one state in the tab ──────────────────────────────────────────
+  //
+  // The whole point of the pin: the tab shows the state being edited, not the state the
+  // sessions happen to be in. Here the live plan is one running session, so a preview of
+  // `done` is visibly a different picture and a different title.
+  actions.setField('style', plugin.DEFAULT_STYLE)
+  assert.ok(
+    decodeURIComponent(mountedIcons()[0].href).includes('fill="#4d6bfe"'),
+    'the live plan is what the tab shows to begin with',
+  )
+
+  actions.preview('done')
+  assert.ok(
+    decodeURIComponent(mountedIcons()[0].href).includes('fill="#22c55e"'),
+    'a preview puts the state it names in the tab',
+  )
+  assert.equal(
+    shown(documentStub.title),
+    'alert.status.done · Part one · Part two — DeepSeek Harness',
+    'and composes the title for that state too',
+  )
+
+  // A preview is a picture, not an event: the live plan is what the alert diff is taken
+  // against, so leaving a preview neither replays a chime nor swallows one that arrived
+  // while it was up.
+  actions.preview(undefined)
+  assert.ok(
+    decodeURIComponent(mountedIcons()[0].href).includes('fill="#4d6bfe"'),
+    'leaving the preview restores the live state',
+  )
+  assert.equal(shown(documentStub.title), 'alert.status.running · Part one · Part two — DeepSeek Harness')
+
+  // The tab must not wear a preview once the page is out of sight. That is exactly when
+  // the icon is the only channel this plugin has left, and a state nobody asked for any
+  // more would make it a liar at the worst possible moment.
+  actions.preview('waiting')
+  assert.ok(decodeURIComponent(mountedIcons()[0].href).includes('fill="#f59e0b"'), 'the preview is up')
+  documentStub.hidden = true
+  listeners.get('visibilitychange')()
+  assert.ok(
+    decodeURIComponent(mountedIcons()[0].href).includes('fill="#4d6bfe"'),
+    'going out of sight ends the preview',
+  )
+  assert.equal(shown(documentStub.title), 'alert.status.running · Part one · Part two — DeepSeek Harness')
+  documentStub.hidden = false
+
+  // Reset clears the stored document; the shipped one brings every channel back.
   actions.reset()
-  assert.deepEqual(section, {}, 'reset clears the stored switches')
+  assert.deepEqual(section, {}, 'reset clears the stored document')
 
   // Teardown releases the element, and every effect was registered with a label
   // the framework can attribute.
   for (const dispose of effects.reverse()) dispose()
-  assert.equal(icon.parentNode, null, 'teardown releases the icon')
+  assert.equal(mountedIcons().length, 0, 'teardown releases the icon')
+
+  // A render after teardown must not mount a new one. The settings row releases its
+  // preview as it unmounts, and that call can arrive after the plugin is gone; an icon
+  // mounted then would belong to nobody and never come off the tab.
+  actions.preview('done')
+  assert.equal(mountedIcons().length, 0, 'a render after teardown must not put an icon back')
 }
 
 // ── the manifest contract ───────────────────────────────────────────────────

@@ -1,22 +1,40 @@
 /**
- * dsh-sentry's style document, as a litearea grammar.
+ * dsh-sentry's style document: the reader the engine and the editor share, and the
+ * litearea grammar the settings editor is written against.
  *
- * The language is line-oriented: a line names one of the plugin's states and then
- * says what that state looks like, either as bare words or as `key=value` pairs.
+ * The document
+ * ------------
+ * One small text file decides how the four session states look AND sound. It has
+ * two kinds of line, and which kind a line is, is visible from the line itself:
  *
- *     # comments and blank lines are ignored
- *     running  circle  blue  turn   3
- *     waiting  rounded amber blink  1.1
- *     approval rounded amber blink  1.9
- *     done     circle  green flush  1.6
+ *     // document settings first, one per line, at the top level
+ *     icon on
+ *     title on
+ *     sound background
+ *     chime-gap 1.5s
+ *     keep-done 60s
+ *     volume 0.5
  *
- *     running shape=none color=gray motion=still speed=1
+ *     // then one block per state, with one named property per line
+ *     waiting {
+ *       shape rounded
+ *       color amber
+ *       motion blink
+ *       speed 1.1s
+ *       chime A5 E6
+ *     }
  *
- * A bare word goes into the first positional slot the line has not filled, in the
- * order shape, colour, pattern, motion, speed — except that the value sets are
- * disjoint, so in practice the *word itself* says where it goes and the slot order
- * only decides what a word that fits nothing is measured against. That is the
- * plugin's own reading of the language and this grammar reproduces it.
+ * Every property is named. There is no positional slot, no value that means one
+ * thing in one place and another elsewhere, and no `key=value` spelling to choose
+ * between: a line is `name value`, and a name that is not a property of the scope
+ * the line is in is reported with the list of names that are. That is the whole
+ * reason for the rewrite — the previous language placed bare words by guessing
+ * which vocabulary they belonged to, so `running circle blue turn 3` was four
+ * guesses in a row and a reader had to hold the slot order in their head.
+ *
+ * Durations are seconds unless a unit says otherwise: `3`, `1.1s`, `300ms`, `2m`.
+ * Notes are equal-tempered names (`A5`, `E6`, `C#4`, `Bb3`) or a frequency in Hz,
+ * so a chime reads as music rather than as four magic numbers.
  *
  * Why the grammar lives HERE and not in the editor
  * -----------------------------------------------
@@ -24,55 +42,87 @@
  * value, because a library that carried every consumer's language would make every
  * consumer bundle every language. So the grammar for THIS DSL is this plugin's own
  * module, and `src/client.js` passes the plugin's constants in — which is what keeps
- * the vocabulary the editor offers and the vocabulary `parseStyle` accepts one list
+ * the vocabulary the editor offers and the vocabulary the reader accepts one list
  * rather than two that agree until someone edits one of them.
  *
- * Why the lexical layer cannot validate an option's value
- * ------------------------------------------------------
- * It is worth stating, because it is the first thing a grammar author tries. The
- * obvious rule is "a word after `=` must be one of the shape words", and it is
- * wrong: the rule can see the `=` but not the KEY, so it cannot tell `shape=blue`
- * from `color=blue`. Written that way, `color=blue` earns a complaint that blue is
- * not a shape. The key is structural information, so option values are validated by
- * the structural pass below and only the line-leading state word is validated
- * lexically, where nothing shares its position and there is nothing to confuse it
- * with.
- *
- * Deliberately stricter than the host parser
- * ------------------------------------------
- * `parseStyle` in the plugin does no value checking for a known option: it writes
- * `shape=bogus` into the rule and lets `resolveLook` quietly substitute the shipped
- * default later. Nothing tells the user, and a typo shows up as an icon that simply
- * never changed. This grammar reports it, as a warning rather than an error, since
- * the document still works — it just does not mean what it says.
- *
- * It also does NOT accept `fallback`. The plugin's module comment shows a
- * `fallback none` line, but `STYLE_STATES` holds only the four states and any other
- * leading word is reported as an unknown state; `fallback` is derived internally
- * from `STYLE_FALLBACK_LOOK` and has never been parseable. The comment is stale, and
- * copying it here would have made the editor disagree with the parser it edits for.
+ * One reader, two callers
+ * -----------------------
+ * `readStyleDocument` is the single structural pass: it decides what the document
+ * means AND records what is wrong with it, with ranges. The engine's
+ * `resolveStyle` calls it to get drawable values; the grammar's `analyze` calls it
+ * to paint, complete, and explain the same text. The previous version of this file
+ * carried a second copy of the walk because the grammar was written to stand alone
+ * — and a second copy is a second opinion, which is exactly how an editor comes to
+ * offer a property the parser then rejects.
  *
  * @module dsh-sentry/style-grammar
  */
 
 import { defineGrammar, defineVocabulary, lineStarts } from '@citisen/litearea'
 
-// ─── the shapes this language is written in ──────────────────────────────────
+// ─── the two values with a syntax of their own ───────────────────────────────
+//
+// A duration and a note are the only things here that are not a word out of a
+// closed list, so they are the only things that need a parser. Both live at this
+// level rather than inside the grammar factory because the engine needs them too:
+// `resolveStyle` turns a note into a frequency, and the row prints a duration.
+
+/** Semitone offsets inside an octave, by note letter. */
+const NOTE_LETTERS = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }
+
+/** A4's frequency in Hz — the anchor the equal-tempered scale is built from. */
+const NOTE_A4_HZ = 440
+
+/** A4's MIDI number, which is what counts the semitones in either direction. */
+const NOTE_A4_MIDI = 69
+
+/** The quietest and loudest frequency a `chime` line may name, in Hz. */
+const NOTE_MIN_HZ = 20
+const NOTE_MAX_HZ = 20_000
 
 /**
- * One positional slot of a state line, in the order a bare word fills them.
- * @typedef {'shape' | 'color' | 'pattern' | 'motion' | 'speed'} DshSentrySlot
+ * Parse a duration into seconds.
+ *
+ * `3` and `3s` are the same three seconds, because a bare number being seconds is
+ * the one unit rule worth remembering: it is what `speed 3` reads as. `ms` and `m`
+ * are there for the two values where a second is the wrong size — a chime gap is
+ * measured in fractions of a second and a completed window in minutes.
+ *
+ * @param text - the value as written.
+ * @returns the duration in seconds, or undefined when the text is not one.
  */
+export function parseDuration(text) {
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m)?$/.exec(text)
+  if (match === null) return undefined
+  const value = Number.parseFloat(match[1])
+  if (!Number.isFinite(value)) return undefined
+  const unit = match[2] ?? 's'
+  if (unit === 'ms') return value / 1000
+  if (unit === 'm') return value * 60
+  return value
+}
 
 /**
- * The four facts one state's appearance is made of.
- * @typedef {object} DshSentryLook
- * @property {string} shape - the background shape.
- * @property {string} color - the name of a palette entry.
- * @property {string} pattern - the carved pattern, `none` in this build.
- * @property {string} motion - what moves.
- * @property {number} speed - seconds per revolution or per cycle.
+ * The frequency of one written note, or undefined when it is not a note.
+ *
+ * Equal temperament from A4 = 440 Hz, which is the tuning the shipped chime was
+ * always written in: `chime A5 E6` reproduces the two-note rise, and it does so in
+ * a spelling that says what it is.
+ *
+ * @param text - the note as written, such as `A5`, `E6`, `C#4`, or `Bb3`.
+ * @returns the frequency in Hz rounded to two decimals, or undefined.
  */
+export function noteFrequency(text) {
+  const match = /^([A-Ga-g])([#b]?)(-?\d)$/.exec(text)
+  if (match === null) return undefined
+  const letter = match[1].toUpperCase()
+  const accidental = match[2] === '#' ? 1 : match[2] === 'b' ? -1 : 0
+  const octave = Number.parseInt(match[3], 10)
+  const midi = (octave + 1) * 12 + NOTE_LETTERS[letter] + accidental
+  return Math.round(NOTE_A4_HZ * 2 ** ((midi - NOTE_A4_MIDI) / 12) * 100) / 100
+}
+
+// ─── the reader ──────────────────────────────────────────────────────────────
 
 /**
  * One word of the document, with the range it occupies.
@@ -87,6 +137,7 @@ import { defineGrammar, defineVocabulary, lineStarts } from '@citisen/litearea'
  * @typedef {object} DshSentryProblem
  * @property {number} from - the offset the underline starts at.
  * @property {number} to - the offset after it.
+ * @property {number} line - the zero-based line the problem is on.
  * @property {string} message - what to tell the user.
  * @property {string} code - the stable tag, so a host or a test can act on meaning.
  * @property {'error' | 'warning' | 'info' | 'hint'} severity - how loudly it speaks.
@@ -95,29 +146,375 @@ import { defineGrammar, defineVocabulary, lineStarts } from '@citisen/litearea'
 /**
  * One line of the document, read.
  *
- * A line rather than a rule, because half of what the structural walk produces is
- * about a line that is not finished yet: `pendingKey` and `keys` describe a rule
- * being typed, which is exactly when a completion asks.
+ * A line rather than a rule, because half of what the walk produces is about a
+ * line that is not finished yet: `key` and `values` describe a property being
+ * typed, which is exactly when a completion asks.
  * @typedef {object} DshSentryLine
  * @property {number} number - zero-based, so a completion can find the caret's line.
- * @property {string | undefined} state - the state the line opens, as written.
- * @property {boolean} known - whether that state is one this document understands.
+ * @property {number} from - the offset the line starts at.
+ * @property {number} to - the offset after its last character, newline excluded.
+ * @property {string} body - the line with its comment removed.
  * @property {DshSentryWord[]} words - the words on the line, comments removed.
- * @property {Record<string, string>} slots - the value each positional slot ended up
- *   with, whatever syntax put it there.
- * @property {string[]} keys - the option keys the line named, in order, whether or
- *   not they are known.
- * @property {string | undefined} pendingKey - the option key whose value the line
- *   has not written yet, as `speed=`.
+ * @property {string | undefined} state - the state whose block the line is in, or
+ *   undefined at the top level.
+ * @property {string | undefined} opens - the state a line opens a block for.
+ * @property {boolean} closes - whether the line closes the open block.
+ * @property {string | undefined} key - the property the line names, when it is one
+ *   the line's scope accepts; `undefined` while the name is still being typed.
+ * @property {DshSentryWord[]} values - the words written after the property.
+ * @property {DshSentryProblem[]} problems - what is wrong with this line.
  */
 
 /**
- * What one pass over the document produced.
- * @typedef {object} DshSentryState
- * @property {DshSentryLine[]} lines - every line, read.
- * @property {DshSentryProblem[]} problems - what the structural walk found;
- *   `validate` reports these verbatim.
+ * What one property accepts.
+ *
+ * The spec is the document's type system, and it is the caller's: the plugin owns
+ * the vocabulary (a shape, a preset colour, a motion) and this module owns how a
+ * value of that kind is read and how a bad one is described. `resolveStyle` reads
+ * the same spec to coerce, so a value the walk accepted is a value the engine can
+ * use without checking it again.
+ * @typedef {object} DshSentryKeySpec
+ * @property {'word' | 'number' | 'duration' | 'chime'} kind - how the value reads.
+ * @property {readonly string[]} [words] - the closed list a `word` accepts.
+ * @property {number} [min] - the low end of the accepted range, in the value's own
+ *   unit (seconds for a duration).
+ * @property {number} [max] - the high end of the accepted range.
+ * @property {readonly string[]} [states] - the states the property means anything
+ *   in; a line naming it anywhere else is reported as inert rather than dropped in
+ *   silence.
+ * @property {readonly string[]} [suggest] - values a completion offers, for a kind
+ *   whose values are not a closed list.
  */
+
+/**
+ * Read a document into the facts the engine draws from and the problems it has.
+ *
+ * Total by construction: anything the walk does not understand is reported and
+ * left out, and the caller keeps its shipped default for that one property. A typo
+ * in a settings file must not be able to leave a tab without an icon.
+ *
+ * @param text - the document, or anything else a settings file happened to hold.
+ * @param options - `{ states, keys, spec }`: the states a block may open, the
+ *   properties each scope accepts, and what each property reads.
+ * @returns `{ globals, rules, lines, problems }` — the top-level values, one object
+ *   per state with the values its block wrote, every line read, and every problem
+ *   found.
+ */
+export function readStyleDocument(text, options) {
+  const states = options?.states ?? []
+  const keys = options?.keys ?? { global: [], state: [] }
+  const spec = options?.spec ?? {}
+
+  const globals = {}
+  const rules = {}
+  const lines = []
+  const problems = []
+
+  // A non-string is a corrupt write rather than a document; an empty one still has
+  // one (empty) line, and the completion layer asks about that line the moment the
+  // editor opens on a new install.
+  if (typeof text !== 'string') return { globals, rules, lines, problems }
+
+  /** The state whose block is open, if any. */
+  let open
+  /** The line that opened it, so an unclosed block points at its own opener. */
+  let opener
+
+  const starts = lineStarts(text)
+  for (let number = 0; number < starts.length; number += 1) {
+    const from = starts[number] ?? 0
+    const rawTo = starts[number + 1] ?? text.length
+    let to = rawTo
+    while (to > from && (text.charAt(to - 1) === '\n' || text.charAt(to - 1) === '\r')) to -= 1
+    const raw = text.slice(from, to)
+    // `//` starts a comment anywhere on the line. Deliberately not `#`, which note
+    // names need: `C#4` is a note, not a comment, and a language whose comment
+    // character eats part of its own vocabulary is a language nobody can write in.
+    const comment = raw.indexOf('//')
+    const body = comment === -1 ? raw : raw.slice(0, comment)
+
+    const words = []
+    const wordPattern = /[^\s,{}]+/g
+    let match
+    while ((match = wordPattern.exec(body)) !== null) {
+      words.push({
+        text: match[0],
+        from: from + match.index,
+        to: from + match.index + match[0].length,
+      })
+    }
+
+    const line = {
+      number,
+      from,
+      to,
+      body,
+      words,
+      state: open,
+      opens: undefined,
+      closes: false,
+      key: undefined,
+      values: [],
+      problems: [],
+    }
+    lines.push(line)
+
+    const trimmed = body.trim()
+    if (trimmed === '') continue
+
+    /**
+     * Record a problem against this line, in both places it has to appear.
+     * @param mark - the word to underline.
+     * @param message - what to tell the user.
+     * @param code - the stable tag.
+     * @param severity - how loudly it speaks.
+     * @returns {void}
+     */
+    const fail = (mark, message, code, severity = 'error') => {
+      const problem = { from: mark.from, to: mark.to, line: number, message, code, severity }
+      line.problems.push(problem)
+      problems.push(problem)
+    }
+
+    if (trimmed === '}') {
+      line.closes = true
+      if (open === undefined) {
+        const at = from + body.indexOf('}')
+        fail(
+          { from: at, to: at + 1 },
+          'Nothing is open here, so there is nothing to close.',
+          'stray-brace',
+        )
+      } else {
+        open = undefined
+      }
+      continue
+    }
+
+    if (trimmed.endsWith('{')) {
+      const name = words[0]
+      if (name === undefined) {
+        const at = from + body.indexOf('{')
+        fail({ from: at, to: at + 1 }, 'A block needs a state in front of its `{`.', 'missing-state')
+        continue
+      }
+      line.opens = name.text
+      if (!states.includes(name.text)) {
+        fail(
+          name,
+          `Unknown state "${name.text}" — this document understands ${states.join(', ')}.`,
+          'unknown-state',
+        )
+        open = undefined
+        continue
+      }
+      if (open !== undefined) {
+        fail(
+          name,
+          `"${name.text}" opens a block while "${open}" is still open — close it with a \`}\` line first.`,
+          'nested-block',
+        )
+      }
+      if (words.length > 1) {
+        fail(
+          words[1],
+          `"${words[1].text}" is not inside the block — "${name.text} {" takes nothing else on its line.`,
+          'stray-word',
+        )
+      }
+      open = name.text
+      opener = line
+      line.state = name.text
+      if (rules[name.text] === undefined) rules[name.text] = {}
+      continue
+    }
+
+    if (body.includes('{') || body.includes('}')) {
+      const at = from + body.search(/[{}]/)
+      fail(
+        { from: at, to: at + 1 },
+        'A brace is only understood at the end of a state line, as in `waiting {`.',
+        'stray-brace',
+      )
+      continue
+    }
+
+    const key = words[0]
+    if (key === undefined) continue
+    line.values = words.slice(1)
+
+    if (open === undefined && states.includes(key.text) && words.length === 1) {
+      fail(
+        key,
+        `"${key.text}" opens a block — write "${key.text} {" on a line of its own.`,
+        'unopened-block',
+      )
+      continue
+    }
+
+    const accepted = open === undefined ? keys.global : keys.state
+    if (!accepted.includes(key.text)) {
+      const what = open === undefined ? 'setting' : `property of "${open}"`
+      fail(
+        key,
+        `Unknown ${what} "${key.text}" — this document understands ${accepted.join(', ')}.`,
+        'unknown-key',
+      )
+      continue
+    }
+
+    // A known property, so the line is a property line whatever its value does —
+    // the completion layer reads `key` to decide what the caret is completing.
+    line.key = key.text
+    const spec_ = spec[key.text] ?? {}
+    if (open !== undefined && spec_.states !== undefined && !spec_.states.includes(open)) {
+      fail(
+        key,
+        `"${key.text}" does nothing in "${open}" — only ${spec_.states.join(', ')} are chimed at.`,
+        'inert-property',
+        'warning',
+      )
+      continue
+    }
+
+    const checked = readValue(key, line.values, spec_)
+    if (checked.message !== undefined) {
+      fail(checked.mark, checked.message, 'bad-value')
+      continue
+    }
+    if (open === undefined) globals[key.text] = checked.value
+    else rules[open][key.text] = checked.value
+  }
+
+  // An open block at the end of the document is a mistake worth naming: without it
+  // the lines under it read as properties of a state the reader never closed, and
+  // the messages they earn are about the wrong problem.
+  if (open !== undefined && opener !== undefined) {
+    const mark = opener.words[0] ?? { from: opener.from, to: opener.to }
+    const problem = {
+      from: mark.from,
+      to: mark.to,
+      line: opener.number,
+      message: `"${open}" is never closed — add a line with a single \`}\`.`,
+      code: 'unclosed-block',
+      severity: 'error',
+    }
+    opener.problems.push(problem)
+    problems.push(problem)
+  }
+
+  return { globals, rules, lines, problems }
+}
+
+/**
+ * How a value of one kind is written, for a message that has to say what it wanted.
+ * @param spec - the property's spec.
+ * @returns a readable phrase.
+ */
+function expectedValue(spec) {
+  if (spec.kind === 'chime') return 'note names such as "A5 E6", or "off" for silence'
+  if (spec.kind === 'duration') return 'a duration such as 1.5s or 300ms'
+  if (spec.kind === 'number') return `a number between ${String(spec.min)} and ${String(spec.max)}`
+  return (spec.words ?? []).join(', ')
+}
+
+/**
+ * Read one property's value, or say why it is not one.
+ *
+ * The whole value is read or none of it is: a chime whose second note is a typo is
+ * reported and the state keeps its shipped sound, rather than playing a chime that
+ * is half of what the document says.
+ *
+ * @param key - the property's word, so a missing value has a range to point at.
+ * @param values - the words written after the property.
+ * @param spec - the property's spec.
+ * @returns `{ value }` when the value reads, `{ mark, message }` when it does not.
+ */
+function readValue(key, values, spec) {
+  if (spec.kind === 'chime') {
+    if (values.length === 0) {
+      return {
+        mark: key,
+        message: `"${key.text}" needs notes — write ${expectedValue(spec)}.`,
+      }
+    }
+    if (values.length === 1 && (values[0].text === 'off' || values[0].text === 'none')) {
+      return { value: { silent: true, labels: [], frequencies: [] } }
+    }
+    const frequencies = []
+    const labels = []
+    for (const word of values) {
+      const named = noteFrequency(word.text)
+      const hertz = named ?? (/^\d+(?:\.\d+)?$/.test(word.text) ? Number.parseFloat(word.text) : undefined)
+      if (hertz === undefined || hertz < NOTE_MIN_HZ || hertz > NOTE_MAX_HZ) {
+        return {
+          mark: word,
+          message: `"${word.text}" is not a note — write a note name such as A5, or a frequency in Hz such as 880.`,
+        }
+      }
+      frequencies.push(Math.round(hertz * 100) / 100)
+      labels.push(word.text)
+    }
+    return { value: { silent: false, labels, frequencies } }
+  }
+
+  if (values.length === 0) {
+    return {
+      mark: key,
+      message: `"${key.text}" needs a value — write ${expectedValue(spec)}.`,
+    }
+  }
+  if (values.length > 1) {
+    return {
+      mark: values[1],
+      message: `"${key.text}" takes one value, but ${String(values.length)} were written — write ${expectedValue(spec)}.`,
+    }
+  }
+
+  const word = values[0]
+  if (spec.kind === 'word') {
+    const words = spec.words ?? []
+    if (words.includes(word.text)) return { value: word.text }
+    return {
+      mark: word,
+      message: `"${word.text}" is not a value "${key.text}" accepts — expected ${words.join(', ')}.`,
+    }
+  }
+
+  if (spec.kind === 'number') {
+    if (!/^\d+(?:\.\d+)?$/.test(word.text)) {
+      return {
+        mark: word,
+        message: `"${word.text}" is not a number — write ${expectedValue(spec)}.`,
+      }
+    }
+    const value = Number.parseFloat(word.text)
+    if (value < spec.min || value > spec.max) {
+      return {
+        mark: word,
+        message: `${word.text} is outside what "${key.text}" accepts — write ${expectedValue(spec)}.`,
+      }
+    }
+    return { value }
+  }
+
+  const seconds = parseDuration(word.text)
+  if (seconds === undefined) {
+    return {
+      mark: word,
+      message: `"${word.text}" is not a duration — write ${expectedValue(spec)}.`,
+    }
+  }
+  if (seconds < spec.min || seconds > spec.max) {
+    return {
+      mark: word,
+      message: `${word.text} is outside what "${key.text}" accepts — write ${expectedValue(spec)}.`,
+    }
+  }
+  return { value: seconds }
+}
+
+// ─── the grammar ─────────────────────────────────────────────────────────────
 
 /**
  * The vocabularies and shipped defaults a host may override.
@@ -129,201 +526,71 @@ import { defineGrammar, defineVocabulary, lineStarts } from '@citisen/litearea'
  * grammar follow.
  * @typedef {object} DshSentryStyleOptions
  * @property {readonly string[]} [states] - the states a document may address, in
- *   the order the list shows them.
+ *   the order a list shows them.
+ * @property {{ global: readonly string[], state: readonly string[] }} [keys] - the
+ *   properties each scope accepts.
+ * @property {Readonly<Record<string, DshSentryKeySpec>>} [spec] - what each property
+ *   reads.
  * @property {readonly string[]} [shapes] - the background shapes a rule may name.
  * @property {readonly string[]} [motions] - the motions a rule may apply.
- * @property {readonly string[]} [patterns] - the patterns still accepted as
- *   `pattern=<name>`.
  * @property {Readonly<Record<string, string>>} [colors] - the named palette.
  *   Presets on purpose: a free colour can be illegible.
- * @property {readonly string[]} [options] - the option keys a rule may write.
- * @property {Readonly<Record<string, DshSentryLook>>} [defaults] - the shipped look
- *   per state, used to rank a completion and to document a word.
+ * @property {readonly string[]} [modes] - the on/off/background words.
+ * @property {readonly string[]} [notes] - the note names a completion offers.
+ * @property {Readonly<Record<string, object>>} [defaults] - the shipped look per
+ *   state, used to rank a completion and to document a word.
  */
 
 /**
  * Build the grammar for dsh-sentry's style document.
  *
- * Everything but this function is declared INSIDE it, and that is not a style
- * choice. The build splices this file into `src/client.js`, where it shares the
- * plugin's own scope — a classic script has no module table to hold a second file —
- * so a top-level constant here would be a second `SHAPES` beside the plugin's, and
- * would either collide with it or shadow it. One name, the factory's, can do
- * neither.
+ * Everything but this function and the three value readers above is declared
+ * INSIDE it, and that is not a style choice. The build splices this file into
+ * `src/client.js`, where it shares the plugin's own scope — a classic script has no
+ * module table to hold a second file — so a top-level `SHAPES` here would be a
+ * second `SHAPES` beside the plugin's, and would either collide with it or shadow
+ * it. The readers are top-level because both halves call them, and their names are
+ * ones this plugin has nowhere else.
  *
  * @param {DshSentryStyleOptions} [options] - the vocabularies and shipped defaults.
  * @returns {object} a grammar that paints, completes, diagnoses, and explains the
  *   language.
  */
 export function dshSentryStyleGrammar(options = {}) {
-  // ── the vocabulary, as the caller gave it ─────────────────────────────────
-  //
-  // The fallbacks are the plugin's shipped vocabulary verbatim, including the
-  // palette, whose eight members exist because the two contrast failures that plugin
-  // has already shipped were both free colour choices. A preset cannot be illegible,
-  // so the set is closed and the editor must not offer anything else. They are here
-  // for a caller that passes nothing; `src/client.js`, the only caller in the
-  // browser, passes its own so the two cannot drift.
+  const STATES = options.states ?? []
+  const KEYS = options.keys ?? { global: [], state: [] }
+  const SPEC = options.spec ?? {}
+  const SHAPES = options.shapes ?? []
+  const MOTIONS = options.motions ?? []
+  const COLOR_NAMES = Object.keys(options.colors ?? {})
+  const MODES = options.modes ?? []
+  const NOTES = options.notes ?? []
+  const LOOK = options.defaults ?? {}
 
-  /** The states a document may address, in the order a list shows them. */
-  const FALLBACK_STATES = ['running', 'waiting', 'approval', 'done']
-  /** The background shapes a rule may name. */
-  const FALLBACK_SHAPES = ['circle', 'rounded', 'square', 'none']
-  /** The motions a rule may apply. */
-  const FALLBACK_MOTIONS = ['still', 'turn', 'blink', 'flush']
-  /** The patterns a rule may carve. Empty in this build, and that is the truth. */
-  const FALLBACK_PATTERNS = []
-  /** The named palette, by name. */
-  const FALLBACK_COLORS = {
-    blue: '#4d6bfe',
-    amber: '#f59e0b',
-    green: '#22c55e',
-    red: '#ef4444',
-    purple: '#8b5cf6',
-    gray: '#8b8f97',
-    dark: '#23262c',
-    light: '#eef0f3',
-  }
-  /** The option keys a rule may write. `bg` is kept as an alias for `color`. */
-  const FALLBACK_OPTIONS = ['shape', 'color', 'pattern', 'motion', 'speed', 'bg']
-  /** The shipped look per state, used to rank a completion and to document. */
-  const FALLBACK_LOOK = {
-    running: { shape: 'circle', color: 'blue', pattern: 'none', motion: 'turn', speed: 3 },
-    waiting: { shape: 'rounded', color: 'amber', pattern: 'none', motion: 'blink', speed: 1.1 },
-    approval: { shape: 'rounded', color: 'amber', pattern: 'none', motion: 'blink', speed: 1.9 },
-    done: { shape: 'circle', color: 'green', pattern: 'none', motion: 'flush', speed: 1.6 },
-  }
+  /** Every property name, either scope, in the order a list offers them. */
+  const ALL_KEYS = [...new Set([...KEYS.global, ...KEYS.state])]
 
-  const STATES = options.states ?? FALLBACK_STATES
-  const SHAPES = options.shapes ?? FALLBACK_SHAPES
-  const MOTIONS = options.motions ?? FALLBACK_MOTIONS
-  const PATTERNS = options.patterns ?? FALLBACK_PATTERNS
-  const COLORS = options.colors ?? FALLBACK_COLORS
-  const COLOR_NAMES = Object.keys(COLORS)
-  const OPTIONS = options.options ?? FALLBACK_OPTIONS
-  const LOOK = options.defaults ?? FALLBACK_LOOK
-
-  /** The positional slots, in the order a bare word fills them. */
-  const SLOTS = ['shape', 'color', 'pattern', 'motion', 'speed']
-
-  /** The scope each slot's values are painted under. */
-  const SLOT_SCOPE = {
-    shape: 'value.shape',
-    color: 'value.color',
-    pattern: 'value.pattern',
-    motion: 'value.motion',
-    speed: 'value.number',
-  }
-
-  /** Which positional slot an option key writes. `bg` is an alias for `color`. */
-  const KEY_SLOT = {
-    shape: 'shape',
-    color: 'color',
-    bg: 'color',
-    pattern: 'pattern',
-    motion: 'motion',
-    speed: 'speed',
-  }
-
-  /**
-   * The patterns a bare word may name.
-   *
-   * Empty in this build, and that is the shipped truth rather than a placeholder:
-   * see the plugin's `PATTERNS`. `none` is the one word the `pattern=` option still
-   * takes, and it is deliberately not a bare-word alternative, because `none` is
-   * also a shape and a token cannot mean two things.
-   */
-  const PATTERN_WORDS = PATTERNS.length > 0 ? PATTERNS : ['none']
-
-  // ── helpers ───────────────────────────────────────────────────────────────
-  // Every one of them closes over the vocabulary resolved above, so a word set, the
-  // paint, the message, and the completion list cannot disagree: they are read from
-  // one binding rather than assembled four times.
+  /** The line shape that makes the first word a state rather than a property. */
+  const BLOCK_LINE = /^\s*[\w#-]+\s*\{/
 
   /**
    * A vocabulary, with the one setting this grammar always wants.
    *
-   * `caseSensitive` is on for every word here because the host parser compares with
+   * `caseSensitive` is on for every word here because the reader compares with
    * `includes` on the literal: a suggestion list that accepted `Circle` would be
    * teaching a spelling the plugin then rejects.
-   * @param {object} spec - the declaration, minus the repeated setting.
-   * @returns {object} the resolved vocabulary.
+   * @param spec - the declaration, minus the repeated setting.
+   * @returns the resolved vocabulary.
    */
   function closedVocabulary(spec) {
     return defineVocabulary({ ...spec, caseSensitive: true })
   }
 
-  /**
-   * The words a slot accepts, for both a message and a completion list.
-   * @param {string} slot - a positional slot name, or an option key such as `bg`.
-   * @returns {readonly string[]} the accepted words, or an empty list for a slot
-   *   whose values are free (`speed`).
-   */
-  function wordsForSlot(slot) {
-    if (slot === 'shape') return SHAPES
-    if (slot === 'color' || slot === 'bg') return COLOR_NAMES
-    if (slot === 'motion') return MOTIONS
-    if (slot === 'pattern') return PATTERN_WORDS
-    return []
-  }
-
-  /**
-   * What a slot expects, in words, for a diagnostic message.
-   * @param {string} slot - a positional slot name, or an option key such as `bg`.
-   * @returns {string} a readable list.
-   */
-  function expectedList(slot) {
-    if (slot === 'speed') return 'a number of seconds, such as 3 or 1.1'
-    const words = wordsForSlot(slot)
-    if (words.length === 0) return 'pattern=<name>'
-    return words.join(', ')
-  }
-
-  /**
-   * Whether a value written for an option key is acceptable.
-   * @param {string} key - the option key.
-   * @param {string} value - the value as written.
-   * @returns {string | undefined} a complaint, or undefined when the value is fine.
-   */
-  function valueProblem(key, value) {
-    if (key === 'speed') {
-      return Number.isFinite(Number.parseFloat(value))
-        ? undefined
-        : `"${value}" is not a speed — write a number of seconds, such as 3 or 1.1. The shipped rate is used instead.`
-    }
-    if (VOCAB_FOR_KEY[key] === undefined) return undefined
-    const words = wordsForSlot(key)
-    if (words.includes(value)) return undefined
-    const noun = key === 'bg' ? 'preset colour' : key
-    return `"${value}" is not a ${noun} — expected ${words.join(', ')}. The shipped default is used instead.`
-  }
-
-  /**
-   * The option a value is being written for, when the caret is inside one.
-   *
-   * Read from the text before the caret on the caret's own line. The parse reads
-   * whole lines, and part-way through `shape=ci` the line is not a finished rule yet
-   * — the local reading is correct in the middle of the edit, which is the only
-   * moment a completion is ever asked.
-   *
-   * The value has to be the word the caret is IN, which is why the pattern allows no
-   * whitespace between the `=` and the caret. Without that, any earlier `key=` on the
-   * line would claim the list: a line that already said `pattern=none` would go on
-   * offering patterns instead of moving on to the slot that is still empty.
-   * @param {string} before - the caret's line, up to the caret.
-   * @returns {string | undefined} the key, or undefined when the caret is not in a
-   *   value.
-   */
-  function optionAtCaret(before) {
-    const match = /([A-Za-z][\w-]*)\s*=([^\s=]*)$/.exec(before)
-    return match?.[1]
-  }
-
   // ── vocabularies ──────────────────────────────────────────────────────────
   // Declared once each so the word set, the paint, the hover text, and the
-  // completion list cannot disagree. Nothing here carries `unknownMessage` except the
-  // state vocabulary, because nothing else can be validated from a token: see the
-  // header note about the key a lexical rule cannot see.
+  // completion list cannot disagree. Only the state vocabulary carries
+  // `unknownMessage`, because only a state word can be validated from a token: a
+  // property's value depends on the property, and the key is structural.
 
   const STATE_VOCAB = closedVocabulary({
     id: 'state',
@@ -331,24 +598,44 @@ export function dshSentryStyleGrammar(options = {}) {
     scope: 'state',
     unknownMessage: 'Unknown state "{word}" — this document understands {allowed}.',
     docs: {
-      running: { detail: 'a turn is in progress', body: 'The agent is working and does not need anyone.' },
       waiting: { detail: 'a question is waiting', body: 'The agent asked something, and the turn is blocked until it is answered.' },
       approval: { detail: 'a permission is waiting', body: 'The agent requested an escalation or a plan review, and the turn is blocked on it.' },
+      running: { detail: 'a turn is in progress', body: 'The agent is working and does not need anyone.' },
       done: { detail: 'the turn finished', body: 'The agent stopped and left the tab alone.' },
+    },
+  })
+
+  const KEY_VOCAB = closedVocabulary({
+    id: 'property',
+    words: ALL_KEYS,
+    scope: 'property',
+    docs: {
+      icon: { detail: 'document setting: draw the tab icon' },
+      title: { detail: 'document setting: prefix the tab title' },
+      sound: { detail: 'document setting: when a chime may sound' },
+      'chime-gap': { detail: 'document setting: least time between two chimes' },
+      'keep-done': { detail: 'document setting: how long "just finished" stays lit' },
+      volume: { detail: 'document setting: the default loudness' },
+      shape: { detail: 'the background shape' },
+      color: { detail: 'the background colour, from the preset palette' },
+      motion: { detail: 'what moves while the state lasts' },
+      speed: { detail: 'the motion rate, in seconds' },
+      chime: { detail: 'the notes this state sounds' },
+      volume: { detail: 'this state\u2019s own loudness' },
     },
   })
 
   const SHAPE_VOCAB = closedVocabulary({
     id: 'shape',
     words: SHAPES,
-    scope: SLOT_SCOPE.shape,
+    scope: 'value.shape',
     docs: {
       circle: { detail: 'a full disc' },
-      rounded: { detail: 'a rounded square' },
+      rounded: { detail: 'a rounded square — the fish is wider than it is tall, and this gives it room' },
       square: { detail: 'a square with sharp corners' },
       none: {
         detail: 'no background',
-        body: 'The fish alone, on whatever the tab gives it. A bare `none` is a SHAPE and never a pattern: one word cannot mean two things.',
+        body: 'The fish alone, on whatever the tab gives it. The fish is carved OUT of the background, so with no background there is nothing to carve and the icon is transparent: for just-the-fish, use rounded or circle.',
       },
     },
   })
@@ -356,104 +643,220 @@ export function dshSentryStyleGrammar(options = {}) {
   const COLOR_VOCAB = closedVocabulary({
     id: 'color',
     words: COLOR_NAMES,
-    scope: SLOT_SCOPE.color,
-    docs: Object.fromEntries(Object.entries(COLORS).map(([name, hex]) => [name, { detail: hex }])),
+    scope: 'value.color',
+    docs: Object.fromEntries(
+      Object.entries(options.colors ?? {}).map(([name, hex]) => [name, { detail: hex }]),
+    ),
   })
 
   const MOTION_VOCAB = closedVocabulary({
     id: 'motion',
     words: MOTIONS,
-    scope: SLOT_SCOPE.motion,
+    scope: 'value.motion',
     docs: {
       still: { detail: 'nothing moves' },
-      turn: { detail: 'rotates', body: 'speed is seconds per revolution.' },
-      blink: { detail: 'alternates', body: 'speed is seconds per cycle.' },
-      flush: { detail: 'pulses', body: 'speed is seconds per cycle.' },
+      turn: { detail: 'the fish rotates', body: 'speed is seconds per revolution.' },
+      blink: { detail: 'the whole icon dims and returns', body: 'speed is seconds per breath.' },
+      pulse: { detail: 'the background colour alternates', body: 'speed is seconds per cycle.' },
     },
   })
 
-  const PATTERN_VOCAB = closedVocabulary({
-    id: 'pattern',
-    words: PATTERN_WORDS,
-    scope: SLOT_SCOPE.pattern,
+  const MODE_VOCAB = closedVocabulary({
+    id: 'mode',
+    words: MODES,
+    scope: 'value.mode',
     docs: {
-      none: {
-        detail: 'carve nothing',
-        body: 'Every dial-like pattern was tried on a real 16px favicon and read as noise, so `none` is the only pattern left. It is written as `pattern=none` and never as a bare word, because `none` is also a shape.',
+      on: { detail: 'the channel is on' },
+      off: { detail: 'the channel is off' },
+      background: { detail: 'only while this page is hidden or unfocused' },
+      always: { detail: 'even while you are looking at the interface' },
+    },
+  })
+
+  /**
+   * What each property explains about itself, per scope.
+   *
+   * Two tables rather than one because `volume` means two things: the top level's
+   * master loudness and a block's factor for that one state. A document that reads
+   * `volume 0.5` at the top and `volume 0.5` inside `done` is not saying the same
+   * thing twice, and the hover has to be able to tell them apart.
+   */
+  const KEY_DOCS = {
+    global: {
+      icon: { detail: 'draw the tab icon', body: `\`on\` or \`off\`. Off restores the app's own favicon.` },
+      title: { detail: 'prefix the tab title', body: `\`on\` or \`off\`. The title is the only place an exact count can be read.` },
+      sound: {
+        detail: 'when a chime may sound',
+        body: '`background` (the default) chimes only while this page is hidden or unfocused; `always` chimes even while you are looking at it; `off` silences every chime.',
+      },
+      'chime-gap': {
+        detail: 'least time between two chimes',
+        body: 'Measured against the clock rather than a timer, because a background tab throttles timers to the minute. One burst of questions should be one chime.',
+      },
+      'keep-done': {
+        detail: 'how long "just finished" stays lit',
+        body: 'Set it to 0 and the finished state never shows — the completion chime rides the same edge, so it falls silent too.',
+      },
+      volume: {
+        detail: 'the default loudness',
+        body: 'The loudness every chimed state plays at unless its own block names one. Both spellings are the same kind of number: a block\u2019s `volume` does not multiply this one, it replaces it.',
       },
     },
-  })
-
-  /** What each option key explains about itself. */
-  const KEY_DOCS = {
-    shape: { detail: 'background shape', body: `One of ${SHAPES.join(', ')}.` },
-    color: { detail: 'disc colour', body: `${COLOR_NAMES.join(', ')} — all presets, chosen so the fish stays legible.` },
-    pattern: { detail: 'carved pattern', body: 'Only `none` remains; write it as `pattern=none`.' },
-    motion: { detail: 'what moves', body: `One of ${MOTIONS.join(', ')}.` },
-    speed: { detail: 'seconds per cycle', body: 'A number: seconds per revolution for `turn`, seconds per cycle otherwise.' },
-    bg: { detail: 'an alias for color', body: 'Kept so a document written against an earlier release still says what it means.' },
+    state: {
+      shape: { detail: 'the background shape', body: `One of ${SHAPES.join(', ')}.` },
+      color: { detail: 'the background colour', body: `${COLOR_NAMES.join(', ')} — all presets, chosen so the fish stays legible.` },
+      motion: { detail: 'what moves', body: `One of ${MOTIONS.join(', ')}.` },
+      speed: { detail: 'the motion rate', body: 'Seconds per revolution for `turn`, per cycle otherwise. `1.1s` and `1100ms` are the same rate.' },
+      chime: {
+        detail: 'the notes this state sounds',
+        body: 'Note names (`A5 E6`) or frequencies in Hz (`880 1318.5`), played in order. `off` silences this state alone.',
+      },
+      volume: {
+        detail: 'this state\u2019s own loudness',
+        body: 'Overrides the document\u2019s default loudness for this state alone. It replaces that number rather than scaling it, so the settings row prints exactly one of the two — never their product.',
+      },
+    },
   }
 
   /** Every vocabulary, by the scope its words are painted under, for hover. */
   const BY_SCOPE = new Map([
     ['state', STATE_VOCAB],
-    [SLOT_SCOPE.shape, SHAPE_VOCAB],
-    [SLOT_SCOPE.color, COLOR_VOCAB],
-    [SLOT_SCOPE.pattern, PATTERN_VOCAB],
-    [SLOT_SCOPE.motion, MOTION_VOCAB],
+    ['value.shape', SHAPE_VOCAB],
+    ['value.color', COLOR_VOCAB],
+    ['value.motion', MOTION_VOCAB],
+    ['value.mode', MODE_VOCAB],
   ])
 
-  /** The vocabulary that decides a value written for an option key. */
-  const VOCAB_FOR_KEY = {
-    shape: SHAPE_VOCAB,
-    color: COLOR_VOCAB,
-    bg: COLOR_VOCAB,
-    pattern: PATTERN_VOCAB,
-    motion: MOTION_VOCAB,
+  // ── helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * The line record the caret is on, when the analysis has one.
+   * @param context - a completion context.
+   * @returns the line, or undefined.
+   */
+  function lineAt(context) {
+    return context.state?.lines?.[context.line.number]
   }
 
   /**
-   * The completion rows for one slot or option key.
-   *
-   * A slot already filled by the line still gets a list, because replacing a value
-   * is as common as writing the first one — but its own value leads, so accepting
-   * the top row changes nothing by accident.
-   * @param {string} slot - a positional slot name, or an option key such as `bg`.
-   * @param {DshSentryLine | undefined} line - the line the caret is on, when there
-   *   is one.
-   * @returns {object[]} the rows, ready to rank.
+   * The scope a line's property belongs to: a state's name, or `global`.
+   * @param line - the line, or undefined.
+   * @returns the scope key.
    */
-  function valueItems(slot, line) {
-    if (slot === 'speed') {
-      // A speed is a free number, so the list offers the shipped rates rather than
-      // pretending to be exhaustive. The state's own rate leads.
-      const current = line?.state === undefined ? undefined : LOOK[line.state]?.speed
-      const rates = [...new Set([...Object.values(LOOK).map((entry) => entry.speed), 1, 2, 3])].sort(
-        (left, right) => left - right,
-      )
-      return rates.map((rate) => ({
-        label: String(rate),
-        insert: String(rate),
-        kind: 'number',
-        detail: current === rate ? 'the shipped rate for this state' : 'seconds per cycle',
-        sortText: current === rate ? '0' : '1',
-      }))
+  function scopeOf(line) {
+    return line?.state === undefined ? 'global' : 'state'
+  }
+
+  /**
+   * The range a value completion replaces: the value token the caret is in.
+   *
+   * Deliberately NOT `context.word`. `wordChars` is `/[\p{L}\p{N}_#-]/u` — no dot, on
+   * purpose, so that a stray `circle.` is not read as one unknown word — and the price
+   * of that is that the word around the caret in `volume 0.2` is just `2`. Accepting
+   * `0.25` there wrote `0.0.25`: the completion replaced the part `wordChars` could see
+   * and kept the prefix it could not.
+   *
+   * The reader already knows where a value begins and ends, because it split the line
+   * on whitespace, so the range comes from its own record rather than from the lexical
+   * layer's narrower idea of a word. A caret in the whitespace after a value is in no
+   * token, and the default range — the empty word at the caret — is then the right one:
+   * the next value is a new token, not a replacement.
+   *
+   * @param context - a completion context.
+   * @returns the range to replace.
+   */
+  function valueRange(context) {
+    const line = lineAt(context)
+    if (line !== undefined) {
+      for (const word of line.values ?? []) {
+        if (context.caret >= word.from && context.caret <= word.to) {
+          return { from: word.from, to: word.to }
+        }
+      }
     }
-    const words = wordsForSlot(slot)
-    if (words.length === 0) return []
-    const scope = slot === 'bg' ? SLOT_SCOPE.color : SLOT_SCOPE[slot]
-    const vocabulary = BY_SCOPE.get(scope)
-    const filled = line?.slots[KEY_SLOT[slot] ?? 'shape']
-    const noun = slot === 'bg' ? 'color' : slot
-    return words.map((word) => {
-      const entry = vocabulary?.entryFor(word)
+    return context.word
+  }
+
+  /**
+   * A completion row for one word of a vocabulary.
+   * @param word - the word.
+   * @param vocabulary - the vocabulary that documents it.
+   * @param options - `{ current, append, kind }`.
+   * @returns the row.
+   */
+  function wordRow(word, vocabulary, { current, append, kind }) {
+    const entry = vocabulary?.entryFor(word)
+    return {
+      label: word,
+      insert: word,
+      append,
+      kind,
+      detail: word === current ? 'the current value' : entry?.detail,
+      documentation: entry?.body,
+      // The word already written leads, so accepting the top row changes nothing by
+      // accident. Everything else keeps the vocabulary's own order.
+      sortText: word === current ? '0' : '1',
+    }
+  }
+
+  /**
+   * The completion rows for one property's value.
+   * @param line - the caret's line, which names the property.
+   * @returns the rows.
+   */
+  function valueItems(line) {
+    const key = line?.key
+    if (key === undefined) return []
+    const spec = SPEC[key] ?? {}
+    const current = line.values?.[0]?.text
+
+    if (spec.kind === 'chime') {
+      const rows = NOTES.map((note) =>
+        wordRow(note, undefined, { current, append: '\n', kind: 'note' }),
+      )
+      for (const note of rows) {
+        note.documentation =
+          'Notes play in order. Any equal-tempered name works (`A5`, `C#4`, `Bb3`), as does a frequency in Hz (`880`).'
+      }
+      rows.push({
+        label: 'off',
+        insert: 'off',
+        append: '\n',
+        kind: 'note',
+        detail: 'this state stays silent',
+        documentation: 'Silences this state alone; the other two keep their chimes.',
+        sortText: '1',
+      })
+      return rows
+    }
+
+    if (spec.kind === 'word') {
+      const vocabulary =
+        key === 'shape'
+          ? SHAPE_VOCAB
+          : key === 'color'
+            ? COLOR_VOCAB
+            : key === 'motion'
+              ? MOTION_VOCAB
+              : MODE_VOCAB
+      return (spec.words ?? []).map((word) =>
+        wordRow(word, vocabulary, { current, append: '\n', kind: 'value' }),
+      )
+    }
+
+    // A free number or duration: the list offers the rates worth reaching for
+    // rather than pretending to be exhaustive.
+    const shipped = LOOK[line.state]?.[key]
+    return (spec.suggest ?? []).map((value) => {
+      const text = String(value)
+      const isShipped = shipped !== undefined && String(shipped) === text
       return {
-        label: word,
-        insert: word,
-        kind: 'value',
-        detail: word === filled ? `the current ${noun}` : entry?.detail,
-        documentation: entry?.body,
-        sortText: word === filled ? '0' : '1',
+        label: text,
+        insert: text,
+        append: '\n',
+        kind: 'number',
+        detail: isShipped ? 'the shipped value for this state' : 'a value worth trying',
+        sortText: isShipped ? '0' : '1',
       }
     })
   }
@@ -462,207 +865,62 @@ export function dshSentryStyleGrammar(options = {}) {
     id: 'dsh-sentry-style',
     name: 'dsh-sentry style document',
 
-    // A decimal speed is one token because the number RULE says so, not because `.`
-    // is a word character. Leaving `.` out of the predicate stops a stray
-    // `circle.` from being read as one word, matching no shape, and earning a
-    // diagnostic about a word the user never typed.
-    wordChars: /[\p{L}\p{N}_]/u,
+    // A note is `A5`, an accidental is part of the note, and a number is `1.5s` — all
+    // three are one token, so all three are word characters here. The dot is the one
+    // worth explaining: leaving it out was the earlier choice, to stop a stray `circle.`
+    // being read as one unknown word, and it cost more than it bought. `wordChars` is
+    // also what a completion filters by and what a double click selects, so without the
+    // dot the editor believed the word in `volume 0.2` was `2` — and replacing that word
+    // with `0.25` wrote `0.0.25`. A token the reader treats as one value has to be one
+    // word to the editor.
+    wordChars: /[\p{L}\p{N}_#.-]/u,
 
     rules: [
-      { kind: 'match', scope: 'comment', pattern: /#[^\n]*/ },
+      { kind: 'match', scope: 'comment', pattern: /\/\/[^\n]*/ },
 
-      // The first word on a line is a state or it is a mistake. `unknown: {}` asks
-      // for the vocabulary's own rejection, and this is the one place in the
-      // language where the lexical layer can be that sure: nothing else may stand
-      // at the head of a line, so there is no later rule to wait for.
+      // Braces are structure rather than words, and claiming them first is what
+      // lets `waiting{` read as a state and a brace rather than as one unknown word.
+      { kind: 'match', scope: 'punctuation', pattern: /\{|\}/ },
+
+      // The first word of a line that opens a block is a state or it is a mistake.
+      // The `line` predicate is what keeps a top-level setting out of this rule:
+      // `icon on` is a property line, and only `waiting {` is a block.
       {
         kind: 'words',
         words: STATE_VOCAB,
-        when: { firstOnLine: true },
+        when: { firstOnLine: true, line: BLOCK_LINE },
         unknown: {},
       },
 
-      // `shape=` — the key, seen from the `=` so it cannot also swallow a value.
-      { kind: 'match', scope: 'property', pattern: /[A-Za-z][\w-]*(?==)/ },
-      { kind: 'match', scope: 'operator', pattern: /=/ },
-      { kind: 'match', scope: 'separator', pattern: /,/ },
+      // Properties. Membership is not enforced here: an unknown name has to fall
+      // through to the invalid rule so a typo is visible, and the structural pass
+      // reports it with the list the line's own scope accepts — which the lexical
+      // layer cannot know.
+      { kind: 'words', words: KEY_VOCAB, when: { firstOnLine: true } },
 
-      // Values. The sets are disjoint, so membership alone places a bare word, and
-      // none of these rules rejects: a rule that did would claim a word belonging
-      // to the next vocabulary down the list.
+      // Values, painted by what they are. The sets are disjoint, so membership
+      // alone places a word and a value written for the wrong property is still
+      // painted as the value it is — the structural pass is what says it is in the
+      // wrong place, with the exact range.
       { kind: 'words', words: SHAPE_VOCAB },
       { kind: 'words', words: COLOR_VOCAB },
       { kind: 'words', words: MOTION_VOCAB },
-      { kind: 'match', scope: SLOT_SCOPE.speed, pattern: /\d+(?:\.\d+)?/ },
+      { kind: 'words', words: MODE_VOCAB },
+      { kind: 'match', scope: 'value.note', pattern: /[A-Ga-g][#b]?\d/ },
+      { kind: 'match', scope: 'value.number', pattern: /\d+(?:\.\d+)?(?:ms|s|m)?/ },
 
-      // Anything left is a word this language does not know. Painting it as invalid
-      // rather than as plain text makes a typo visible before the structural pass
-      // has even run, and that pass supplies the precise message.
-      { kind: 'match', scope: 'invalid', pattern: /\S+/ },
+      // Anything left is a word this language does not know. Braces are excluded
+      // so a run of text cannot swallow one.
+      { kind: 'match', scope: 'invalid', pattern: /[^\s{}]+/ },
     ],
 
     fallbackScope: 'text',
 
     // ── what the document means ─────────────────────────────────────────────
     //
-    // This walk decides the slot filling AND records what went wrong, rather than
-    // leaving the second job to a second walk. They are the same decision: the only
-    // reason to know which slot is free is to say what a word that fits nothing
-    // should have been, and splitting them would mean two implementations of one
-    // rule — which is exactly how the editors this library replaces came to
-    // disagree with themselves.
-    analyze: (text) => {
-      const starts = lineStarts(text)
-      const lines = []
-      const problems = []
-
-      for (let number = 0; number < starts.length; number += 1) {
-        const from = starts[number] ?? 0
-        const rawTo = starts[number + 1] ?? text.length
-        let to = rawTo
-        while (to > from && (text.charAt(to - 1) === '\n' || text.charAt(to - 1) === '\r')) to -= 1
-        const raw = text.slice(from, to)
-        // The host parser splits the comment off at the first `#` anywhere on the
-        // line, so a `#` inside a value begins a comment there too.
-        const comment = raw.indexOf('#')
-        const body = comment === -1 ? raw : raw.slice(0, comment)
-
-        const words = []
-        const wordPattern = /[^\s,]+/g
-        let match
-        while ((match = wordPattern.exec(body)) !== null) {
-          words.push({
-            text: match[0],
-            from: from + match.index,
-            to: from + match.index + match[0].length,
-          })
-        }
-
-        const line = {
-          number,
-          state: undefined,
-          known: true,
-          words,
-          slots: {},
-          keys: [],
-          pendingKey: undefined,
-        }
-        lines.push(line)
-
-        const first = words[0]
-        if (first === undefined) continue
-        line.state = first.text
-        line.known = STATES.includes(first.text)
-        // An unknown state is a dead end for the parser: it discards the rest of
-        // the line, so complaining about the values on it would be inventing
-        // problems the document does not have.
-        if (!line.known) continue
-
-        /**
-         * Record the value a slot ended up with.
-         * @param {DshSentrySlot} slot - the slot being filled.
-         * @param {string} value - the value as written.
-         * @returns {void}
-         */
-        const claim = (slot, value) => {
-          line.slots[slot] = value
-        }
-
-        for (let index = 1; index < words.length; index += 1) {
-          const word = words[index]
-          if (word === undefined) continue
-          const equals = word.text.indexOf('=')
-          const key = equals === -1 ? undefined : word.text.slice(0, equals)
-          const value = equals === -1 ? undefined : word.text.slice(equals + 1)
-
-          if (key !== undefined) {
-            line.keys.push(key)
-            // `key` exists only because the word held an `=`, so there is always a
-            // right-hand side; an empty one means the value is still being typed.
-            const written = value ?? ''
-            if (written === '') {
-              line.pendingKey = key
-              continue
-            }
-            const complaint = valueProblem(key, written)
-            if (complaint !== undefined) {
-              problems.push({
-                from: word.from,
-                to: word.to,
-                message: complaint,
-                code: 'bad-option-value',
-                severity: 'warning',
-              })
-              continue
-            }
-            const slot = KEY_SLOT[key]
-            if (slot !== undefined) claim(slot, written)
-            continue
-          }
-
-          // A bare word is placed by what it IS. The sets are disjoint, which is
-          // what lets the position be inferred without the slot order mattering.
-          if (MOTIONS.includes(word.text)) {
-            claim('motion', word.text)
-            continue
-          }
-          if (SHAPES.includes(word.text)) {
-            claim('shape', word.text)
-            continue
-          }
-          if (COLOR_NAMES.includes(word.text)) {
-            claim('color', word.text)
-            continue
-          }
-          if (PATTERNS.includes(word.text)) {
-            claim('pattern', word.text)
-            continue
-          }
-          if (Number.isFinite(Number.parseFloat(word.text))) {
-            claim('speed', word.text)
-            continue
-          }
-
-          // It fits nothing, so the host parser measures it against the first slot
-          // the line has not filled — and since every value set has been ruled out
-          // above, the answer can only be "not valid for that slot" or "there is no
-          // slot left".
-          const free = SLOTS.find((slot) => line.slots[slot] === undefined)
-          if (free === undefined) {
-            problems.push({
-              from: word.from,
-              to: word.to,
-              message: `"${word.text}" has nowhere to go — this line already names a shape, colour, pattern, motion, and speed.`,
-              code: 'unexpected-value',
-              severity: 'error',
-            })
-          } else {
-            problems.push({
-              from: word.from,
-              to: word.to,
-              message: `"${word.text}" is not a valid ${free} — expected ${expectedList(free)}.`,
-              code: 'bad-value',
-              severity: 'error',
-            })
-          }
-        }
-      }
-
-      return { lines, problems }
-    },
-
-    // ── what the tokens must be ─────────────────────────────────────────────
-    // One declarative check, because "a key must be one it knows" is exactly the
-    // shape a check is for: a scope, an allowed set, and a message.
-    checks: [
-      {
-        code: 'unknown-option',
-        scopes: ['property'],
-        allow: closedVocabulary({ id: 'option', words: [...OPTIONS, ...PATTERNS] }),
-        severity: 'error',
-        message: 'Unknown option "{word}" — this document understands {allowed}.',
-      },
-    ],
+    // The same walk the engine draws from, so the paint, the diagnostics, the
+    // completions, and the icon cannot disagree about what a line says.
+    analyze: (text) => readStyleDocument(text, { states: STATES, keys: KEYS, spec: SPEC }),
 
     validate: (context) => {
       for (const problem of context.state.problems) {
@@ -679,64 +937,78 @@ export function dshSentryStyleGrammar(options = {}) {
     // ── what can come next ──────────────────────────────────────────────────
     compose: [
       {
-        id: 'state',
-        // A state opens a line, so its list belongs at the head of one — and it has
-        // to stay offered while the state is being spelled, which is why this asks
-        // `firstWord` rather than `firstOnLine`. Asking the stricter question makes
-        // the list vanish after the first letter, which is precisely the "the
-        // completion feels unnatural" complaint this grammar exists to answer.
-        when: (context) => context.firstWord,
-        range: (context) => context.word,
-        items: () =>
-          STATES.map((state) => ({
-            label: state,
-            insert: state,
-            // A space is what the next word on the line needs. The engine will not
-            // add a second one if the document already has whitespace there.
-            append: ' ',
-            kind: 'state',
-            detail: STATE_VOCAB.entryFor(state)?.detail,
-            documentation: STATE_VOCAB.entryFor(state)?.body,
-            sortText: '0',
-          })),
-      },
-      {
-        id: 'value',
+        id: 'line-head',
+        // The head of a line is either a state (to open a block) or a property of
+        // the scope the line is in — and it stays offered while it is being
+        // spelled, which is why this asks `firstWord` rather than `firstOnLine`.
         when: (context) => {
-          const line = context.state.lines[context.line.number]
-          // Values belong to a line that has opened a state, and to the part of it
-          // after the state word.
-          if (line === undefined || line.state === undefined || !line.known) return false
-          const stateWord = line.words[0]
-          return stateWord !== undefined && context.caret > stateWord.to
+          if (!context.firstWord) return false
+          const line = lineAt(context)
+          if (line === undefined) return false
+          if (line.key !== undefined || line.opens !== undefined || line.closes) return false
+          return true
         },
         range: (context) => context.word,
         items: (context) => {
-          const line = context.state.lines[context.line.number]
-          // Inside `key=`, the key names the slot, so the list is exactly that
-          // slot's vocabulary.
-          const key = optionAtCaret(context.line.before)
-          if (key !== undefined && key !== '') {
-            return valueItems(key, line)
+          const line = lineAt(context)
+          const inBlock = line?.state !== undefined
+          const items = []
+          if (!inBlock) {
+            for (const state of STATES) {
+              const entry = STATE_VOCAB.entryFor(state)
+              items.push({
+                label: state,
+                insert: state,
+                // A block needs its brace, and writing it is the one thing the
+                // user would otherwise have to remember.
+                append: ' {',
+                kind: 'state',
+                detail: entry?.detail,
+                documentation: entry?.body,
+                sortText: '0',
+              })
+            }
           }
-          const free = SLOTS.find((slot) => line?.slots[slot] === undefined)
-          const items = free === undefined ? [] : valueItems(free, line)
-          // The keys follow the values: a line names values far more often than it
-          // switches to the `key=value` spelling, so the values lead.
-          for (const key of OPTIONS) {
-            if (line?.keys.includes(key) === true) continue
-            const doc = KEY_DOCS[key]
+          for (const key of inBlock ? KEYS.state : KEYS.global) {
+            const doc = KEY_DOCS[inBlock ? 'state' : 'global'][key]
             items.push({
-              label: `${key}=`,
-              insert: `${key}=`,
+              label: key,
+              insert: key,
+              // The space invites the value, and accepting one ends the line: the
+              // list that follows a value is the property list for the next line,
+              // which is how a document is written without remembering a colon.
+              append: ' ',
               kind: 'property',
               detail: doc?.detail,
               documentation: doc?.body,
               sortText: '1',
             })
           }
+          if (inBlock) {
+            items.push({
+              label: '}',
+              insert: '}',
+              append: '\n',
+              kind: 'punctuation',
+              detail: 'close the block',
+              documentation: 'Every state block has to be closed before the next one opens.',
+              sortText: '2',
+            })
+          }
           return items
         },
+      },
+      {
+        id: 'value',
+        // Values belong to a line that has named a property, after that name.
+        when: (context) => {
+          const line = lineAt(context)
+          if (line === undefined || line.key === undefined) return false
+          const keyWord = line.words[0]
+          return keyWord !== undefined && context.caret > keyWord.to
+        },
+        range: (context) => valueRange(context),
+        items: (context) => valueItems(lineAt(context)),
       },
     ],
 
@@ -745,32 +1017,49 @@ export function dshSentryStyleGrammar(options = {}) {
       const token = context.token
       if (token === undefined) return undefined
       if (token.scope === 'comment') {
-        return { title: 'comment', body: 'Ignored by the parser. A `#` anywhere on a line starts one.' }
+        return { title: 'comment', body: 'Ignored by the reader. `//` anywhere on a line starts one.' }
+      }
+      if (token.scope === 'punctuation') {
+        return {
+          title: token.text,
+          detail: token.text === '{' ? 'opens a state block' : 'closes the open block',
+          body: 'A block holds one state\u2019s properties, one per line.',
+        }
+      }
+      if (token.scope === 'state') {
+        const entry = STATE_VOCAB.entryFor(token.text)
+        return entry === undefined ? undefined : { title: token.text, detail: entry.detail, body: entry.body }
       }
       if (token.scope === 'property') {
-        const doc = KEY_DOCS[token.text]
+        const line = context.state?.lines?.[token.line]
+        const doc = KEY_DOCS[scopeOf(line)][token.text]
         return doc === undefined ? undefined : { title: token.text, detail: doc.detail, body: doc.body }
       }
-      if (token.scope === 'operator' || token.scope === 'separator') return undefined
+      if (token.scope === 'value.note') {
+        const frequency = noteFrequency(token.text)
+        return {
+          title: token.text,
+          detail: frequency === undefined ? 'a note' : `${String(frequency)} Hz`,
+          body: 'Notes play in order, each one starting a little after the one before it. Frequencies in Hz work too.',
+        }
+      }
+      if (token.scope === 'value.number') {
+        return {
+          title: token.text,
+          detail: 'a value',
+          body: 'Seconds unless a unit is written: `1.5s`, `300ms`, `2m`.',
+        }
+      }
       if (token.scope === 'invalid') {
         return {
           title: token.text,
           detail: 'not part of this language',
-          body: 'Nothing here accepts this word: it is not a state, not one of the option keys, and not a value any slot recognises.',
-        }
-      }
-      if (token.scope === SLOT_SCOPE.speed) {
-        return {
-          title: token.text,
-          detail: 'seconds per cycle',
-          body: 'Seconds per revolution for `turn`, seconds per cycle otherwise.',
+          body: 'Nothing here accepts this word: it is not a state, not a property of the scope it is written in, and not a value any property recognises.',
         }
       }
       const entry = BY_SCOPE.get(token.scope)?.entryFor(token.text)
       // Nothing documented means nothing to say. Falling back to the scope name
-      // would put an internal identifier in front of the user — resting the pointer
-      // on a gap in the document once produced a tooltip whose only content was the
-      // word `text`.
+      // would put an internal identifier in front of the user.
       return entry === undefined
         ? undefined
         : { title: token.text, detail: entry.detail, body: entry.body }

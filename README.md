@@ -15,8 +15,8 @@ its **speakers**.
 
 This is a third-party [dsh](https://github.com/deepseek-ai/deepseek-harness)
 profile bundle. It ships as one dual-face package: a Node half that owns the
-durable settings namespace, and a browser half that runs the sentry and
-registers the Settings row.
+durable settings namespace, and a browser half that runs the sentry, reads the
+style document, and registers the Settings row.
 
 Requires dsh `0.1.5-rc.1` or a later `0.1.5-rc.x`; it uses the
 `settings.general.item` slot, the `settingsScope` service, the `sessions` and
@@ -35,7 +35,8 @@ that work while the page is in the background:
 | Sound | A synthesized chime — rising two notes for a question, one note for an approval, a soft low note for a completion |
 
 All three are on by default — a notice nobody can discover is a notice nobody
-has — and every one of them can be switched off on its own.
+has — and each one is a line of the style document that turns it off: `icon off`,
+`title off`, `sound off`, or `chime off` inside a single state's block.
 
 ## The state model
 
@@ -43,10 +44,10 @@ Every session is in exactly one state, and the precedence is the whole design:
 
 | State | Detected from | Signal |
 | --- | --- | --- |
-| Waiting for an answer | A pending interaction of kind `question` | Amber, breathing, counted in the badge |
-| Waiting for an approval | A pending interaction of kind `approval` | Amber, static |
-| Working | `summary.running` | Blue, rotating |
-| Just finished | The `running → idle` **edge**, within a decay window | Green, static |
+| Waiting for an answer | A pending interaction of kind `question` | Amber, breathing (`blink`, 1.1 s per cycle), counted in the badge |
+| Waiting for an approval | A pending interaction of kind `approval` | Amber, breathing more slowly (`blink`, 1.9 s) |
+| Working | `summary.running` | Blue, the fish turning (`turn`, 3 s per revolution) |
+| Just finished | The `running → idle` **edge**, within a decay window | Green, the background alternating (`pulse`, 1.6 s per cycle) |
 | Idle or blank | — | Nothing |
 
 Three decisions in that table are worth explaining, because each one is a
@@ -57,7 +58,7 @@ rejected alternative:
 - **"Just finished" is an edge, not `summary.completed`.** That flag stays true
   until you select the session, so trusting it would leave the tab green forever
   and cost the signal all of its meaning. The plugin stamps the `running → idle`
-  transition instead and keeps the signal for `doneWindowMs` (one minute by
+  transition instead and keeps the signal for `keep-done` (60 seconds by
   default).
 - **A blank session is not information.** A session that was created and never
   used would otherwise paint a "working" ring around an empty conversation the
@@ -67,23 +68,53 @@ rejected alternative:
 ## The sound
 
 Synthesized with Web Audio — no audio files are shipped, and nothing is fetched.
+What each state plays is a `chime` line of the document and how loud it plays is a
+`volume` line — the document's, or the state's own — so this table is the shipped
+document rather than a behaviour baked into the engine:
 
-| Event | Sound |
+| Event | Shipped sound |
 | --- | --- |
-| A question starts waiting | A5 → E6, two overlapping notes (a real musical interval, not two arbitrary beeps) |
-| An approval starts waiting | One A5 note |
-| A session finishes | One soft low note, quieter |
+| A question starts waiting | A5 → E6, two overlapping notes at the document's 50% (a real musical interval, not two arbitrary beeps) |
+| An approval starts waiting | One A5 note at its own 45% |
+| A session finishes | One A4 note at its own 25% — an octave down and deliberately quiet |
 
-Two rules shape when it is allowed to make a sound, and both are switchable:
+`chime` takes note names — equal temperament from A4 = 440 — or frequencies in
+Hz, and plays them in order. Both spellings are the same sound; the names are
+just the one a musician can read. A chime is a chime: the stagger between two
+notes and the length of one note are the plugin's, not the document's, because a
+document that had to spell out a per-note envelope would be a synthesizer patch
+rather than a notification setting.
+
+`volume` appears twice, and it means one thing both times: a loudness. The
+top-level line is the default; a block's line overrides it for that state. It
+**replaces** rather than scales it, so the percentage a preview card prints is
+always a number on one of those two lines — or the shipped 0.5, which the card
+marks *(default)* when neither line exists. That last sentence is a design this
+replaced: an earlier version paired a top-level master with a per-state factor
+whose numbers lived **in the plugin**, not in the document, so a reader who wrote
+`volume 1` saw `85%` on one card and `45%` on another and could not find either
+figure anywhere.
+
+Three rules shape when it is allowed to make a sound, and all three are lines
+now:
 
 - **Foreground is silence.** While you are looking at the interface the icon and
   the title have already said it, and a chime on top of that is an interruption.
-  Sound is for a hidden or unfocused page; *Only when this page is in the
-  background* is the switch that turns the rule off.
+  `sound background` (the shipped value) is that rule, `sound always` turns it
+  off, and `sound off` silences every chime at once.
 - **One sound per burst.** Agents ask several questions in a row, and three
-  chimes in three seconds reads as a malfunction. The gap is measured against
-  `Date.now()` rather than a timer, because a background tab throttles
-  `setTimeout` to the minute and a timer-based gap would fire late or not at all.
+  chimes in three seconds reads as a malfunction. `chime-gap` is the least time
+  between two chimes, 1.5s as shipped, and it is measured against `Date.now()`
+  rather than a timer, because a background tab throttles `setTimeout` to the
+  minute and a timer-based gap would fire late or not at all.
+- **`chime off` is one state's silence, not everyone's.** The three chimed states
+  are separate channels on purpose: a `waiting` block that says `chime off` must
+  not swallow the approval that arrives in the same burst, so a state with
+  nothing to play is skipped rather than allowed to silence the event.
+
+A `chime` or a `volume` written in a `running` block is reported as a warning:
+a turn *starting* is not an event this plugin chimes on, and a property that
+does nothing should say so rather than be kept in silence.
 
 ### The autoplay policy, stated plainly
 
@@ -97,8 +128,9 @@ around. What the plugin does instead:
 - a chime requested while the context is still suspended is **dropped**, not
   queued — a chime that arrives two minutes late, after the click that finally
   unlocked audio, is worse than no chime;
-- the row's **Preview** button plays the chime, which doubles as the gesture that
-  unlocks audio and as a way to set the volume by ear.
+- each preview card in the Settings row offers a button that plays exactly that
+  state's chime, which doubles as the gesture that unlocks audio and as a way to
+  hear the notes and set the loudness by ear.
 
 Until it is unlocked, the icon and the title still carry everything.
 
@@ -122,64 +154,175 @@ the channel off strips the prefix instead of leaving it in the tab forever.
 
 *Settings → General → Tab alerts.*
 
-| Setting | Default | What it does |
-| --- | --- | --- |
-| Tab icon styling | On | Draws the state styling on the tab icon, or restores the original |
-| Style document | see below | The appearance of the four states, as a small text document |
-| Tab title prefix | On | Composes the status into `document.title` |
-| Sound | On | Master switch for the chime |
-| Chime when a question waits | On | The rising two-note chime |
-| Chime when an approval waits | On | The single note |
-| Chime when a session finishes | On | The soft low note — a finished turn is ambient information, so this is the first switch to turn off if it starts to feel like noise |
-| Only when this page is in the background | On | The foreground-is-silence rule |
-| Volume | 50% | Chime volume, 0–1 |
-| Completed signal window | 60s | How long a finished session keeps the signal |
+The row is **the document, a live preview of every state, and a reset** — and no
+switches at all. There is exactly one setting (`style`), because every switch the
+row used to carry is a line of the document now: `icon on`, `sound background`,
+`keep-done 60s`, `chime off` all sit next to the state they affect, and there is
+one place to look for how the plugin behaves instead of two that can disagree.
+
+The editor grows with the document instead of scrolling inside itself: the page
+already scrolls, and a second scrollbar for one document is the wrong one to be
+reaching for. The bound that is left is for a pasted document hundreds of lines
+long, not a display decision — the shipped document (42 lines) is always fully
+visible.
+
+Each preview card carries two buttons: **Play**, which sounds that state's chime,
+and **In tab**, which puts the state into the *real tab* — icon and title, live.
+The second one is the only way to accept a configuration change: the tab icon
+otherwise shows the state the sessions happen to be in, so an edit to a state no
+session is in can never be judged. Press it again, leave the settings page, or
+switch away from the tab and the live state comes back — while the page is out of
+sight the tab has to tell the truth, which is the whole reason this plugin exists.
+
+The preview strip draws all four states through the same `sentryFavicon` and
+`motionTick` the tab uses, at the real 32px, on one shared 120 ms timer — and on
+no timer at all when everything in the document is still, since a settings page
+is not the place to hold four intervals open for a document that says `motion
+still`. Each card prints the chime its state will play (`A5 → E6 · volume 50%`,
+or *silent*): the notes and the loudness are the ones the reader resolved, so what
+is heard is what is printed.
+
+Anything the reader could not use is listed under the editor with the line number
+it is on. That list is not decoration — the editor's own squiggles are the version
+that helps while typing, and this is the version that survives a document pasted
+into `settings.yaml` and read on a screen the editor was never opened on.
 
 The durable half lives in `$DSH_HOME/settings.yaml` under the `alert` namespace.
 The namespace is deliberately not a `ui-*` name: dsh reserves that prefix for its
 own shipped surfaces.
 
-### The style document
+## The style document
 
-The icon's appearance is four states, each a **shape, a colour, a pattern, a
-motion, and a rate** — and the interesting part is the combinations. A dozen
-switches could express that; they would also take a dozen interactions to say what
-one line says. So it is one text document:
+One small text document decides how the four session states look *and* sound, and
+it is the whole configuration. The appearance is four states, each a shape, a
+colour, a motion and a rate, plus a chime — and the interesting part is the
+combinations. A dozen switches could express that; they would also take a dozen
+interactions to say what one block says. So the document is the interface, and the
+shipped one is 538 characters:
 
 ```
-running  circle  blue   none  turn   3
-waiting  rounded amber  none  blink  1.1
-approval rounded amber  none  blink  1.9
-done     circle  green  none  flush  1.6
+// dsh-sentry: how each session state looks and sounds.
+// Durations are seconds unless a unit is written: 1.5s, 300ms, 2m.
+
+icon on
+title on
+sound background
+chime-gap 1.5s
+keep-done 60s
+volume 0.5
+
+waiting {
+  shape rounded
+  color amber
+  motion blink
+  speed 1.1s
+  chime A5 E6
+}
+
+approval {
+  shape rounded
+  color amber
+  motion blink
+  speed 1.9s
+  chime A5
+  volume 0.45
+}
+
+running {
+  shape circle
+  color blue
+  motion turn
+  speed 3s
+}
+
+done {
+  shape circle
+  color green
+  motion pulse
+  speed 1.6s
+  chime A4
+  volume 0.25
+}
 ```
 
-The syntax is line-oriented: one line per state, `key value` pairs, `#` starts a
-comment, and the leading tokens may be positional in the order shape, colour,
-pattern, motion, speed. Anything a line omits keeps that state's shipped value.
+`lib/index.js` ships the same document as an array of lines — the two halves are
+separate bundles that cannot share a module, so the gate compares the two copies
+character for character, and a default changed on one side only is a failing check
+rather than a row that renders one document and an engine that runs another.
 
-| Vocabulary | Values |
-| --- | --- |
-| shape | `circle` `rounded` `square` `none` |
-| pattern | `none` (only — every dial-like pattern read as noise at 16px) |
-| motion | `still` `turn` `blink` `flush` |
-| colour | `blue` `amber` `green` `red` `purple` `gray` `dark` `light` |
+Top-level settings come first, one per line, before any block:
 
-**The parser is total, deliberately.** Anything it does not understand is dropped
-and reported, and the shipped value is used instead — a typo in a settings file
-must not be able to leave a tab without an icon. Colours are preset *names* rather
-than free values for the same reason the shapes are a closed list: both failures
-this plugin has already shipped were contrast failures, and a preset cannot be
-illegible.
+| Setting | Values | What it does |
+| --- | --- | --- |
+| `icon` | `on` `off` | Draws the state styling on the tab icon, or restores the app's own favicon |
+| `title` | `on` `off` | Composes the status into `document.title` |
+| `sound` | `off` `background` `always` | When a chime may sound at all: never, only while this page is hidden or unfocused (the shipped value), or even while you are looking at it |
+| `chime-gap` | duration | The least time between two chimes |
+| `keep-done` | duration | How long "just finished" stays lit |
+| `volume` | 0–1 | The default loudness, for every chimed state whose own block does not name one |
 
-The settings row renders its reference table from the vocabularies the parser
-actually uses, so the help cannot drift from the code.
+Then one block per state, in urgency order — `waiting`, `approval`, `running`,
+`done` — with one **named** property per line:
+
+| Property | Values | What it does |
+| --- | --- | --- |
+| `shape` | `circle` `rounded` `square` `none` | The background's outline |
+| `color` | `blue` `amber` `green` `red` `purple` `gray` `dark` `light` | The background colour, from the preset palette |
+| `motion` | `still` `turn` `blink` `pulse` | What moves while the state lasts |
+| `speed` | duration | The rate: seconds per revolution for `turn`, per cycle for `pulse`, per breath for `blink` |
+| `chime` | note names, frequencies, or `off` | The notes this state sounds, in order; `off` silences this state alone |
+| `volume` | 0–1 | This state's own loudness, overriding the document's default — it replaces that number rather than scaling it; with neither written the shipped 0.5 applies and the card says so |
+
+Every property is named, and that is the whole point of the shape: there is no
+positional slot, no `key=value` spelling to choose between, and no word that means
+one thing in one place and something else elsewhere. A block may name its
+properties in any order, because the order is the writer's rather than the
+reader's, and a line a block omits keeps that state's shipped value. The language
+this replaced placed bare words by guessing which vocabulary they belonged to, so
+`running circle blue turn 3` was four guesses in a row and a reader had to hold
+the slot order in their head.
+
+Durations are seconds unless a unit says otherwise: `3`, `1.1s`, `300ms`, `2m`.
+A bare number being seconds is the one unit rule worth remembering, because it is
+what `speed 3` reads as.
+
+Comments are `//`, and deliberately **not** `#`: `#` is part of a note name, and a
+language whose comment character eats part of its own vocabulary is a language
+nobody can write in. `chime C#4` is a note, not a comment.
+
+**The reader is total, deliberately.** A mistake is reported with the line number
+it is on, and that one property falls back to its shipped default; a typo in a
+settings file must not be able to leave the tab without an icon. Colours are preset *names*
+rather than free values for the same reason the shapes are a closed list: both
+failures this plugin has already shipped were contrast failures, and a preset
+cannot be illegible.
+
+**One reader, two callers.** `readStyleDocument` in `src/style-grammar.js` is the
+single structural walk over the document: it decides what the text means *and*
+records what is wrong with it, with ranges. The engine's `resolveStyle` calls it
+to get drawable values; the editor grammar's `analyze` calls it to paint,
+complete, and explain the same text. So the icon, the diagnostics and the
+completions are three views of one answer rather than three implementations of
+it — an earlier version of that file carried a second copy of the walk because
+the grammar was written to stand alone, and a second copy is a second opinion,
+which is exactly how an editor comes to offer a property the parser then rejects.
+
+The row's reference is built from the same vocabulary constants the reader is
+handed, so the help cannot drift from the code. What is written by hand is the
+prose, which is the part a translator has to see.
 
 ## The icon
 
 The fish is the product's own art, lifted byte-for-byte out of the shipped
 `dsh-web-frontend/dist/favicon.svg` by `scripts/fish-path.mjs` — not redrawn, not
 simplified, not a lookalike. It is drawn at **full size**, which for a 50×50
-drawing in a 32px canvas is `32/50`.
+drawing in a 32px canvas is `32/50` — and centred on the art's *own* centre, which
+is 25 in its own units rather than 16. Those two numbers come from one constant
+because confusing them is a bug this plugin shipped: centring a 50-unit drawing as
+if it were a 32-unit one held the fish in the bottom-right corner of the background
+with its nose and tail cut off by the rim, and no test noticed, because every test
+recomputed the same arithmetic the bug used. The pixel check measures the rendered
+geometry instead.
 
 It is then **carved out of the background**, not painted on it. That is the
 decision the whole icon rests on:
@@ -200,9 +343,10 @@ The state is carried by the background's **colour and shape**, by the **motion**
 and by a corner digit for the question count. Nothing else is drawn on the icon:
 the dial-like patterns this once carved around the fish — spokes, clock hands,
 petals, windmill, dots, rays — were each rendered at the real 16px size and each
-read as noise around a fish nobody could then see. The `pattern` slot survives
-with `none` as its only value, which is the record of a question that got
-answered.
+read as noise around a fish nobody could then see. The `pattern` slot is gone
+entirely rather than kept at `none`, because a vocabulary of one word is a
+vocabulary that lies about what can be configured, and a line that can never do
+anything is a line the reader would have to accept and then ignore.
 
 ### Motion
 
@@ -217,9 +361,12 @@ Motion is **driven by the plugin**, not declared in the SVG. A favicon is render
 in a document the page does not own, and the motion categories do not have equal
 standing there: an earlier version left the spin to an `<animateTransform>` and it
 did not move, while the colour pulse worked. So a motion is a function from a tick
-to an appearance — `blink` dims, `flush` pulses, `turn` steps the angle — and the
-engine repaints every 120 ms while something is animating. `prefers-reduced-motion`
-stops the timer, and an idle tab holds no timer at all.
+to an appearance — `blink` dims, `pulse` alternates the colour, `turn` steps the
+angle — and the engine repaints every 120 ms while something is animating.
+`prefers-reduced-motion` stops the timer, and an idle tab holds no timer at all.
+The settings row's previews are the same function on the same 120 ms, so a state
+that moves in the strip moves in the tab and a document that is all `still` holds
+no timer in either place.
 
 One honest consequence: the fish is only visible where the tab bar differs from the
 background. On a tab bar that happens to match, the background reads as a plain
@@ -283,22 +430,30 @@ Five checks in five places, each one covering what the one before it cannot:
 
 | Check | Runs | Catches |
 | --- | --- | --- |
-| `verify-host.mjs` | Node, stubbed | A schema whose defaults or ranges drifted from what the browser half assumes |
-| `verify-settings.mjs` | Node, real dsh services | The namespace contract the interface depends on: that the real settings service accepts `alert`, that it applies `live`, and — the failure this one exists for — that the value the **host** resolves and the defaults the **browser half** falls back to are the same value. They live in bundles that cannot share a module, so a default changed on one side only would render one setting and enforce another |
-| `verify-client.mjs` | Node, stubbed | Every pure decision: the state precedence, the completion edge, the icon geometry, the title composition, the sound gating, the settings row, and `apply()` end to end against stub services |
-| `browser-check.mjs` | Headless Chrome | The three things a stub cannot judge: whether the browser **decodes** the favicon data URL (an unencoded `#` truncates it into half a fish, with no error anywhere), whether the DOM contract holds (its own `<link>` appended to the head, the app's link left alone, its own element removed), and whether the `MutationObserver` title guard survives the browser's own scheduling |
+| `verify-host.mjs` | Node, stubbed | The host half on its own: that the namespace is `alert` and not a reserved `ui-*` one, that the roster is exactly `['style']`, that the schema resolves the shipped document, and that a hand-edited `settings.yaml` cannot put a number, a list or a boolean where the text belongs. Also that `apply()` is a no-op rather than a throw when no settings provider is composed |
+| `verify-settings.mjs` | Node, real dsh services | The namespace contract the interface depends on: that the real settings service accepts `alert`, that it applies `live`, and — the failure this one exists for — that the value the **host** resolves and the defaults the **browser half** falls back to are the same value, document included, byte for byte. They live in bundles that cannot share a module, so a default changed on one side only would render one setting and enforce another |
+| `verify-client.mjs` | Node, stubbed | Every pure decision: the state precedence, the completion edge, the icon geometry, the title composition, the sound gating, the settings row, and `apply()` end to end against stub services. Since the rewrite it also covers the document: the shared reader — the engine and the grammar are run over the same broken text and must report the same problems — the note names and the duration syntax, the grammar the editor is written against (its paint, its diagnostics and its completions), the four previews at the size and with the sound the row prints, and the problems list under the editor |
+| `browser-check.mjs` | Headless Chrome | The things a stub cannot judge: whether the browser **decodes** the favicon data URL (an unencoded `#` truncates it into half a fish, with no error anywhere), whether the DOM contract holds (its own `<link>` appended to the head, the app's link left alone, its own element removed), whether the `MutationObserver` title guard survives the browser's own scheduling, whether a settings write really repaints the icon, and whether a preview really reaches the tab |
 | `verify-profile.mjs` | Node, real dsh profile | That the loader actually composes this bundle: the `cordis.patch.yml` row resolves, `dsh.profile.bundles` carries it, and the browser roster can find and serve `lib/client.js` |
 
 The last two skip cleanly when the thing they need is absent — no Chromium, no
 local dsh — so they are safe in CI; `DSH_REQUIRE=1` turns either skip into a
 failure.
 
-`src/client.js` is the only source of the browser half. It is written as an ES
-module for readability, but a DSH client bundle is a **classic script** that may
-only register a lazy CommonJS factory through `window.__ModuleLoader__`, so
-`scripts/build-client.mjs` applies that envelope and rewrites the static imports
-(which is also why there is no JSX — the transform is deliberately narrow and
-fails loudly on any form it cannot express).
+`src/client.js` is the browser half's source, and `src/style-grammar.js` is its
+second file: the reader and the grammar the editor is written against. Neither is
+loaded as a module. A DSH client bundle is a **classic script** that may only
+register a lazy CommonJS factory through `window.__ModuleLoader__` and may only
+`require` the platform singletons the shell seeds, so `scripts/build-client.mjs`
+applies that envelope, rewrites the static imports, and splices the grammar file
+in where its import stood. A spliced module shares the factory's scope, which is
+why the vocabularies there are declared inside the grammar factory — a top-level
+`SHAPES` would be a second one beside the plugin's. The build also compiles the
+settings editor in from `node_modules`, because `@citisen/litearea` is not a
+platform singleton and the documented alternative — a second client bundle and a
+second roster row — is a plugin with two halves to install. That same transform is
+why there is no JSX: it is deliberately narrow, and it fails loudly on any form it
+cannot express.
 
 `src/fish.txt` is generated: it is the shipped favicon's path, extracted from the
 installed dsh rather than transcribed, because a hand-copied 3400-character path
@@ -319,17 +474,19 @@ fewer ways to collide with the interface when it stays out of the render tree.
 
 Every decision is a pure function taking its inputs as arguments — the clock, the
 storage, the visibility and focus bits, the reduced-motion bit, the note table.
-`apply()` is the only impure part, and it is deliberately thin.
-`scripts/verify-client.mjs` drives the pure half in Node, where a regression is a
-failing check instead of a silently-green favicon.
+The document reader is one of them, which is what lets the same walk answer for
+the icon and for the editor in Node. `apply()` is the only impure part, and it is
+deliberately thin. `scripts/verify-client.mjs` drives the pure half in Node,
+where a regression is a failing check instead of a silently-green favicon.
 
 ## Package layout
 
 | Path | What it is |
 | --- | --- |
-| `lib/index.js` | Node half: the `alert` settings namespace. Loaded by the loader. |
+| `lib/index.js` | Node half: the `alert` settings namespace, which holds the one document field. Loaded by the loader. |
 | `lib/client.js` | Browser half, **generated from `src/client.js`** and served to the GUI. |
-| `src/client.js` | Browser half source: the state model, the three channels, the row. |
+| `src/client.js` | Browser half source: the state model, the three channels, the settings row, the previews, and `resolveStyle`. |
+| `src/style-grammar.js` | Browser half source: `readStyleDocument`, the single structural walk, and the litearea grammar the editor is written against. Spliced into `lib/client.js` by the build. |
 | `src/fish.txt` | Generated: the shipped favicon's fish path. |
 | `cordis.patch.yml` | The profile layer this bundle contributes. |
 | `scripts/` | Build, generation, and verification scripts. |
@@ -339,10 +496,14 @@ failing check instead of a silently-green favicon.
 ## Known limitations
 
 - **The favicon is shared, and this plugin takes it while it has something to
-  say.** It appends its own `<link rel="icon">` and removes it when the tab goes
-  quiet, leaving the app's own link untouched. A second plugin that also writes a
-  favicon would be the last one to mount; that is a conflict to settle in the
-  interface, not by making this one quieter.
+  say.** It never touches the app's own link: every change of picture mounts a
+  fresh `<link rel="icon">` of its own and takes the previous one out — a tab strip
+  follows the document's *set* of icon links, and a link whose `href` changed in
+  place is not reliably a change, which is where a configuration edit that left the
+  tab showing the old icon came from — and it removes its element when the tab goes
+  quiet. A second plugin that also writes a favicon mounts its own element, and
+  because this one remounts on every redraw it will effectively stay the winner;
+  that is a conflict to settle in the interface, not by making this one quieter.
 - **A background tab's repaints are throttled.** The browser stretches the interval
   between repaints while the tab is hidden — the icon is still in the right state
   with the right colour, but the turn is not smooth. That is the browser's power
@@ -353,11 +514,22 @@ failing check instead of a silently-green favicon.
 - **The waiting count is capped at three.** At 16px a two-character badge is a
   smudge, so four or more shows no digit — the ring still says "several", and the
   title still carries the exact number.
-- **"Just finished" needs a decay window to mean anything.** With
-  `Completed signal window` set to 0 the green signal never appears — and, since
-  the completion chime is driven by the same edge, that chime goes quiet with it.
-  That is a legitimate configuration rather than a broken one, but it is a
-  two-channel switch wearing one name.
+- **"Just finished" needs a decay window to mean anything.** With `keep-done 0`
+  the green signal never appears — and, since the completion chime rides the same
+  `running → idle` edge, that chime goes quiet with it. That is a legitimate
+  configuration rather than a broken one, but it is a two-channel switch wearing
+  one name.
+- **The document is the only interface for a single value.** There is no colour
+  picker and no rate slider: changing one state's colour means editing one line,
+  and leaving that line out is the only way to say "whatever the plugin ships".
+  That is the trade the document made — one place where the appearance and the
+  sound of all four states are written, instead of a dozen controls each saying a
+  fragment of it.
+- **A card is not the tab strip.** It draws through the same builder at the same
+  32px, so a state that looks wrong in the strip looks wrong in the tab — which is
+  what the **In tab** button is for. What neither can show is what a particular
+  browser's chrome does to the icon, which is the one thing the icon cannot know
+  either.
 - **The sound needs one click to unlock**, per the browser's autoplay policy. The
   plugin cannot and does not try to defeat that.
 - **A dsh release can turn a channel into a no-op.** If `ui-layout` stops writing
@@ -370,6 +542,3 @@ failing check instead of a silently-green favicon.
 ## License
 
 MIT
-
-
-

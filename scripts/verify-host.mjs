@@ -62,8 +62,6 @@ const {
   ALERT_NAMESPACE,
   ALERT_FIELDS,
   AlertSchema,
-  DONE_WINDOW_MAX,
-  DONE_WINDOW_MIN,
   DEFAULT_STYLE_DOCUMENT,
   apply,
 } = host
@@ -72,48 +70,34 @@ assert.equal(ALERT_NAMESPACE, 'alert', 'the namespace must not squat on the rese
 
 // The roster is hand-duplicated on the browser side; this is the copy the
 // browser-side verifier compares against.
-assert.deepEqual(ALERT_FIELDS, [
-  'favicon',
-  'style',
-  'title',
-  'sound',
-  'soundWaiting',
-  'soundApproval',
-  'soundDone',
-  'soundBlocked',
-  'volume',
-  'doneWindowMs',
-])
+assert.deepEqual(ALERT_FIELDS, ['style'])
 
 // The schema resolves a complete default section — what an absent settings
 // document must produce, which is also what the browser half falls back to.
 const defaults = AlertSchema({})
-assert.deepEqual(defaults, {
-  favicon: true,
-  style: DEFAULT_STYLE_DOCUMENT,
-  title: true,
-  sound: true,
-  soundWaiting: true,
-  soundApproval: true,
-  soundDone: true,
-  soundBlocked: true,
-  volume: 0.5,
-  doneWindowMs: 60_000,
-})
+assert.deepEqual(defaults, { style: DEFAULT_STYLE_DOCUMENT })
 
-// A switch value is a boolean at the wire boundary; anything else is a bug in
-// the row rather than a preference to store.
-assert.equal(AlertSchema({ favicon: false }).favicon, false)
-assert.equal(AlertSchema({ volume: 0 }).volume, 0)
-assert.equal(AlertSchema({ doneWindowMs: DONE_WINDOW_MIN }).doneWindowMs, DONE_WINDOW_MIN)
-assert.equal(AlertSchema({ doneWindowMs: DONE_WINDOW_MAX }).doneWindowMs, DONE_WINDOW_MAX)
-assert.throws(() => AlertSchema({ favicon: 'off' }))
-assert.throws(() => AlertSchema({ favicon: 1 }))
-// The ranges are the schema's job because the settings document is editable by
-// hand: a 3x fish must not reach the engine even if the row is bypassed.
-assert.throws(() => AlertSchema({ volume: 4 }))
-assert.throws(() => AlertSchema({ volume: -1 }))
-assert.throws(() => AlertSchema({ doneWindowMs: -1 }))
+// The document is text and only text. Its *contents* are the browser half's
+// business — it has a reader with real diagnostics, which reports what it cannot
+// use and falls back property by property — so the only thing the host validates
+// is that a hand-edited `settings.yaml` cannot put a number where the document
+// belongs.
+assert.equal(AlertSchema({ style: 'icon off' }).style, 'icon off')
+assert.throws(() => AlertSchema({ style: 42 }))
+assert.throws(() => AlertSchema({ style: ['icon on'] }))
+assert.throws(() => AlertSchema({ style: true }))
+// `null` is schemastery's spelling of "unset", so it resolves to the shipped
+// document rather than being refused. Worth pinning: it is the difference between a
+// cleared field and a document that failed validation, and only one of them should
+// leave the tab without an icon.
+assert.equal(AlertSchema({ style: null }).style, DEFAULT_STYLE_DOCUMENT)
+
+// The shipped document is an array of lines joined for the wire, and it is the
+// same document the browser half ships; the browser-side verifier compares the two
+// copies character for character.
+assert.equal(typeof DEFAULT_STYLE_DOCUMENT, 'string')
+assert.ok(DEFAULT_STYLE_DOCUMENT.includes('waiting {'))
+assert.ok(!DEFAULT_STYLE_DOCUMENT.endsWith('\n'), 'the document must not carry a trailing newline')
 
 // Drive apply(ctx) with a stub that records the namespace registration.
 const registered = []
@@ -146,6 +130,6 @@ assert.ok(registered[0].schema !== undefined)
 // it is configurable.
 apply({ inject: () => undefined, get: () => undefined })
 
-console.log('verify-host: OK — namespace registered, defaults and ranges verified')
+console.log('verify-host: OK — namespace registered, defaults and the document field verified')
 
 

@@ -17,6 +17,13 @@
  * 3. **`MutationObserver` timing.** The title guard depends on the plugin's own
  *    write not re-entering its observer *as the browser schedules it*. A stub
  *    that calls the callback synchronously cannot tell whether that holds.
+ * 4. **A settings write reaching the icon, and a preview reaching the tab.** The
+ *    Settings row's editor writes the document through the same scope the engine
+ *    reads, and its preview buttons go through the actions the slot registry
+ *    injects. Whether either actually replaces the tab's icon element (rather than
+ *    mutating the `href` of the one already mounted, which a tab strip does not
+ *    reliably notice) is a question about the browser, not about the plugin's own
+ *    bookkeeping.
  *
  * Usage:
  *   node scripts/browser-check.mjs [path/to/chrome]
@@ -165,6 +172,7 @@ const CHECKLIST = `
       let section = {}
       let revision = 1
       let scopeListener
+      let registeredSlot
       const scope = {
         getSnapshot: () => ({ status: 'ready', value: section, revision, writable: true }),
         subscribe: (listener) => {
@@ -205,7 +213,16 @@ const CHECKLIST = `
             },
           },
         },
-        slots: { inject: (name, callback) => callback(), register: () => () => undefined },
+        slots: {
+          inject: (name, callback) => callback(),
+          // Captured rather than discarded, because the actions the registry injects are
+          // the row's whole interface to the engine: the tab-preview button is only
+          // reachable through them, and whether it reaches the tab is a browser question.
+          register: (options) => {
+            registeredSlot = options
+            return () => undefined
+          },
+        },
       }
 
       try {
@@ -269,6 +286,66 @@ const CHECKLIST = `
             'the favicon decoded at ' + rendered.width + 'x' + rendered.height + ', expected 32x32',
           )
         }
+
+        // ── a settings write reaches the icon ─────────────────────────────────
+        // The row's editor writes the document through the same scope the engine reads,
+        // so this is the whole wire between "the user typed" and "the tab changed" — and
+        // it is the one path a Node stub cannot drive, because it depends on how the
+        // browser schedules the subscription. The document written here says
+        // \`motion still\`, so nothing but this write can repaint anything.
+        const before = sentryLinks()[0].href
+        scope.set('style', 'waiting {\\n  color red\\n  motion still\\n}')
+        await settle()
+        check(sentryLinks().length === 1, 'a settings write must leave exactly one icon link behind')
+        const after = decodeURIComponent(sentryLinks()[0].href)
+        check(after !== before, 'a settings write must change the icon, not leave the old one mounted')
+        check(
+          after.includes('fill="#ef4444"'),
+          'a settings write must repaint the icon in the state it names (got ' +
+            after.slice(after.indexOf('<rect'), after.indexOf('<rect') + 50) +
+            ')',
+        )
+        check(after.includes('mask="url(#disc)"'), 'and must still carve the fish out of it')
+        scope.set('style', '')
+        await settle()
+        check(
+          decodeURIComponent(sentryLinks()[0].href).includes('fill="#f59e0b"'),
+          'and writing the document back must repaint it back',
+        )
+
+        // ── one state in the tab, on demand ───────────────────────────────────
+        // The row's preview button goes through the injected actions and ends in the same
+        // render pass as everything else. The live plan here is still the waiting session,
+        // so a preview of \`done\` is unmistakably a different picture — which is the whole
+        // point: an edit to a state no session is in cannot be judged any other way.
+        check(registeredSlot !== undefined, 'the row must have registered its slot options')
+        const actions = registeredSlot.inject({ sync: () => undefined })
+        check(typeof actions.preview === 'function', 'the row must be able to show a state in the tab')
+        actions.preview('done')
+        await settle()
+        check(
+          decodeURIComponent(sentryLinks()[0].href).includes('fill="#22c55e"'),
+          'a preview must put the state it names in the tab (got ' +
+            decodeURIComponent(sentryLinks()[0].href).slice(
+              decodeURIComponent(sentryLinks()[0].href).indexOf('<rect'),
+              decodeURIComponent(sentryLinks()[0].href).indexOf('<rect') + 50,
+            ) +
+            ')',
+        )
+        check(
+          document.title.includes('alert.status.done'),
+          'and must compose the title for that state (got ' + JSON.stringify(document.title) + ')',
+        )
+        actions.preview(undefined)
+        await settle()
+        check(
+          decodeURIComponent(sentryLinks()[0].href).includes('fill="#f59e0b"'),
+          'and leaving the preview must restore the live state',
+        )
+        check(
+          document.title.includes('alert.status.waiting'),
+          'title and all (got ' + JSON.stringify(document.title) + ')',
+        )
 
         check(
           document.title.includes('\\u2460'),
@@ -350,7 +427,9 @@ try {
     process.exit(1)
   }
   console.log(`browser-check: OK — ${browser}`)
-  console.log('browser-check: data URL decoded at 32x32, DOM contract, and observer timing verified')
+  console.log(
+    'browser-check: data URL decoded at 32x32, DOM contract, title observer, a settings write repainting the icon, and a state previewed in the tab verified',
+  )
 } finally {
   rmSync(scope, { recursive: true, force: true })
 }

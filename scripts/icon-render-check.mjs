@@ -86,10 +86,55 @@ const page = `<!doctype html>
     { label: 'just finished', waiting: 0, running: 0, done: 1, disc: 'green', carved: true },
     { label: 'question outranks a busy tab', waiting: 1, running: 2, disc: 'amber', carved: true, digit: 1 },
   ]
+  /**
+   * Where the fish actually lands, in canvas units.
+   *
+   * Measured, not derived. The bug this exists for — a 50-unit drawing centred as if it
+   * were a 32-unit one — held the fish in the bottom-right corner of the background and
+   * cut its nose and tail off, and it passed every check that recomputed the plugin's own
+   * arithmetic, because it recomputed the same mistake. The carvings are lifted out of
+   * the mask and re-mounted in a clean 32-unit viewport, so what is measured is the
+   * geometry rather than the mask's coordinate plumbing.
+   * @param svg - the icon source.
+   * @returns the fish's bounding box in canvas units, or undefined.
+   */
+  const measureFish = (svg) => {
+    const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml')
+    const carvings = parsed.querySelector('mask > g')
+    if (carvings === null) return undefined
+    const probe = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    probe.setAttribute('viewBox', '0 0 32 32')
+    probe.setAttribute('width', '32')
+    probe.setAttribute('height', '32')
+    probe.style.position = 'fixed'
+    probe.style.left = '0'
+    probe.style.top = '0'
+    probe.appendChild(document.importNode(carvings, true))
+    document.body.appendChild(probe)
+    const path = probe.querySelector('path')
+    const box = path.getBBox()
+    const ctm = path.getCTM()
+    const corners = [
+      [box.x, box.y],
+      [box.x + box.width, box.y],
+      [box.x, box.y + box.height],
+      [box.x + box.width, box.y + box.height],
+    ].map(([x, y]) => ({ x: ctm.a * x + ctm.c * y + ctm.e, y: ctm.b * x + ctm.d * y + ctm.f }))
+    probe.remove()
+    const xs = corners.map((point) => point.x)
+    const ys = corners.map((point) => point.y)
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys),
+    }
+  }
+
   const sample = (svg) => new Promise((resolve) => {
     const image = new Image()
-    image.onload = () => {
-      const canvas = document.createElement('canvas')
+    const fish = measureFish(svg)
+    image.onload = () => {      const canvas = document.createElement('canvas')
       canvas.width = 64; canvas.height = 64
       const ctx = canvas.getContext('2d')
       ctx.drawImage(image, 0, 0, 64, 64)
@@ -118,6 +163,7 @@ const page = `<!doctype html>
         center: at(32, 32),
         // A point on the disc away from the fish and away from the badge.
         discSample: at(32, 8),
+        fish,
         small: null,
         counts: { transparent: count('.'), white: count('W'), dark: count('K'), blue: count('B'), amber: count('A'), green: count('G') },
         map,
@@ -278,6 +324,34 @@ try {
           `      FAIL: the fish's body should be carved out (transparent), got ${JSON.stringify(result.center)}`,
         )
         failures += 1
+      }
+
+      // Where the fish lands. Centring is the property that broke and the one no
+      // recomputation could see: the placement arithmetic is the plugin's, so a check that
+      // redoes it agrees with the bug. This is the browser's own geometry.
+      if (result.fish === undefined) {
+        console.log('      FAIL: the icon carries no carving to measure')
+        failures += 1
+      } else {
+        const box = result.fish
+        const centerX = box.x + box.width / 2
+        const centerY = box.y + box.height / 2
+        console.log(
+          `      fish: x=${box.x.toFixed(2)} y=${box.y.toFixed(2)} w=${box.width.toFixed(2)} ` +
+            `h=${box.height.toFixed(2)} centre=(${centerX.toFixed(2)}, ${centerY.toFixed(2)})`,
+        )
+        if (Math.abs(centerX - 16) > 0.5 || Math.abs(centerY - 16) > 0.5) {
+          console.log(
+            `      FAIL: the fish must sit in the middle of the 32px canvas, got (${centerX.toFixed(2)}, ${centerY.toFixed(2)})`,
+          )
+          failures += 1
+        }
+        // Only the unturned fish is checked for fitting: a rotated box is measured through
+        // the four corners of the unrotated one, which over-estimates it by construction.
+        if ((result.angle ?? 0) === 0 && (box.x < 0 || box.y < 0 || box.x + box.width > 32 || box.y + box.height > 32)) {
+          console.log(`      FAIL: the fish must fit inside the canvas, got ${JSON.stringify(box)}`)
+          failures += 1
+        }
       }
 
       // The badge is the one painted mark, and only a question earns a digit.

@@ -40,7 +40,7 @@
 import React from 'react'
 import { defineStore } from '@deepseek-ai/dsh-client-store'
 import { createEditor } from '@citisen/litearea'
-import { dshSentryStyleGrammar } from './style-grammar.js'
+import { dshSentryStyleGrammar, readStyleDocument } from './style-grammar.js'
 
 /** Settings namespace owned by this plugin (mirrors the host half). */
 const SENTRY_NAMESPACE = 'alert'
@@ -56,25 +56,11 @@ const STYLE_PREFIX = 'dsh-sentry'
 const PLUGIN_ID = /* dsh:plugin-id */ 'dsh-sentry'
 
 // ─── the state model ─────────────────────────────────────────────────────────
-
-/**
- * The four states a session can be in, most urgent first.
- *
- * `waiting` and `approval` are the two halves of "a human must act": the agent
- * asked a question (`ask_user_question`, which includes the plan-review card) or
- * requested a permission escalation. They are separate states because they want
- * different sounds, and because a session blocked on approval and a session
- * blocked on a question are different situations to come back to.
- */
-const STATES = ['waiting', 'approval', 'running', 'done']
-
-/** Ring and badge colors, one per state. */
-const STATE_COLORS = {
-  waiting: '#f59e0b',
-  approval: '#f59e0b',
-  running: '#4d6bfe',
-  done: '#22c55e',
-}
+//
+// The four states, and the precedence that decides which one a tab shows, are named
+// where the document names them: see `STYLE_STATES` below. The projection that
+// computes them from the session services is {@link sessionPlan}, and neither of
+// those needs a second copy of the list here.
 
 /**
  * How long a finished session keeps the green "done" signal, by default.
@@ -86,7 +72,13 @@ const STATE_COLORS = {
  */
 const DEFAULT_DONE_WINDOW_MS = 60_000
 
-/** The shortest gap between two chimes, in ms. */
+/**
+ * The shortest gap between two chimes, in ms — the shipped `chime-gap`.
+ *
+ * The value the document ships with, and the one the row shows in the reference. It
+ * lives here rather than only in the document text because `resolveStyle` needs it
+ * for a document that says nothing.
+ */
 const SOUND_GAP_MS = 1500
 
 /**
@@ -232,50 +224,57 @@ function planHasSignal(plan) {
   return plan.waiting + plan.approval + plan.running + plan.done > 0
 }
 
-// ─── the favicon ─────────────────────────────────────────────────────────────
+// ─── the style document ──────────────────────────────────────────────────────
 
 /**
- * The style DSL.
+ * The style document: one text file that decides how the four states look *and*
+ * what they sound like.
  *
  * A tab icon is not a form: it is four states, each a colour, a background shape,
- * a carved pattern, and a motion, and the interesting part is the *combinations*.
- * A dozen switches could express that; they would also take a dozen interactions
- * to say what one line says. So the whole appearance is one small text document,
- * and the settings row gives it a text box and the documentation.
+ * a motion, and a chime, and the interesting part is the *combinations*. A dozen
+ * switches could express that; they would also take a dozen interactions to say
+ * what one block says, and the sound half of them would only make sense next to
+ * the appearance half. So the whole configuration is one document, and the
+ * settings row gives it an editor, a live preview of every state, and the list of
+ * anything it gets wrong.
  *
- * The syntax is line-oriented on purpose. Every line is one `key value` pair, and
- * a line naming a state opens a rule until the next one:
+ * Every property is named. There is no positional slot and no word that means one
+ * thing in one place and something else elsewhere:
  *
- *   # comments and blank lines are ignored
- *   fallback none                      # when no state applies
- *   running  circle blue spokes=2 arrow turn 3
- *   waiting  rounded amber none blink 1.1
+ *   // document settings first, one per line
+ *   icon on
+ *   sound background
+ *   keep-done 60s
  *
- * The parser is total: anything it does not understand is dropped and reported,
- * and the shipped defaults are used for whatever the document does not say. A
- * typo in a settings file must not be able to leave a tab without an icon.
+ *   waiting {
+ *     shape rounded
+ *     color amber
+ *     motion blink
+ *     speed 1.1s
+ *     chime A5 E6
+ *   }
+ *
+ * The reader is total: a line it does not understand is reported and left out, and
+ * the shipped default stands in for that one property. A typo in a settings file
+ * must not be able to leave a tab without an icon.
  *
  * @module dsh-sentry/style
  */
 
-/** The background shapes a rule may name. */
+/** The background shapes a block may name. */
 const SHAPES = ['circle', 'rounded', 'square', 'none']
 
-/**
- * The patterns a rule may carve out of the background.
- *
- * Empty, and that is a finding rather than an omission: every pattern that did not
- * involve the fish itself was tried on a real 16px favicon and read as noise —
- * clock hands made the icon look like a watch, petals and windmill blades turned it
- * into a smudge. The literal `none` is still accepted for the `pattern=` option, so
- * a document written against an earlier release parses and says what it means; it
- * is deliberately **not** a bare-word alternative, because `none` is also a shape
- * and a token cannot mean two things.
- */
-const PATTERNS = []
+/** The motions a block may apply. */
+const MOTIONS = ['still', 'turn', 'blink', 'pulse']
 
-/** The motions a rule may apply. */
-const MOTIONS_LIST = ['still', 'turn', 'blink', 'flush']
+/**
+ * The words a property takes that are not a shape, a colour, or a motion.
+ *
+ * `on` and `off` are what `icon` and `title` read; `background` and `always` are
+ * what `sound` reads, and `off` is also how a state says it has no chime. One word
+ * per meaning: there is no `none` here, because `none` is a shape.
+ */
+const MODES = ['on', 'off', 'background', 'always']
 
 /**
  * The preset palette. Colours are named rather than free-form because the two
@@ -294,206 +293,279 @@ const PRESET_COLORS = {
   light: '#eef0f3',
 }
 
-/** What an unconfigured install draws. */
+/**
+ * The four states a block may open, most urgent first — the order the row shows them.
+ *
+ * `waiting` and `approval` are the two halves of "a human must act": the agent asked
+ * a question (`ask_user_question`, which includes the plan-review card) or requested
+ * a permission escalation. They are separate states because they want different
+ * sounds, and because a session blocked on approval and a session blocked on a
+ * question are different situations to come back to. The order is the precedence
+ * {@link activeLook} applies to a tab, which can only show one of them at a time.
+ */
+const STYLE_STATES = ['waiting', 'approval', 'running', 'done']
+
+/** The properties a block accepts, in the order the reference lists them. */
+const STYLE_STATE_KEYS = ['shape', 'color', 'motion', 'speed', 'chime', 'volume']
+
+/** The document-level settings, in the order the reference lists them. */
+const STYLE_GLOBAL_KEYS = ['icon', 'title', 'sound', 'chime-gap', 'keep-done', 'volume']
+
+/**
+ * The states something can be *said* about.
+ *
+ * Three of the four states have an event behind them — a question arrives, an
+ * approval arrives, a turn ends — and `running` has none: a turn starting is not
+ * something this plugin interrupts anyone for. A `chime` or a `volume` written in
+ * a `running` block is therefore reported as inert rather than kept in silence.
+ */
+const CHIME_STATES = ['waiting', 'approval', 'done']
+
+/** The note names a `chime` completion offers. Any equal-tempered name is accepted. */
+const STYLE_NOTE_SUGGESTIONS = ['A3', 'C4', 'E4', 'A4', 'C5', 'E5', 'A5', 'E6']
+
+/** The slowest and fastest motion rate a document may name, in seconds per cycle. */
+const SPEED_MIN = 0.2
+const SPEED_MAX = 20
+
+/** The longest chime gap and completed window a document may name, in seconds. */
+const GAP_MAX = 600
+const DONE_MAX = 600
+
+/**
+ * The loudness a chimed state plays at when nothing in the document says otherwise.
+ *
+ * There is no per-state loudness hidden in here, and that is the point: an earlier
+ * version paired a document-level master with an engine-side factor per state, so a
+ * reader who wrote `volume 1` and saw `85%` on one card and `45%` on another had no
+ * line anywhere to trace those numbers to. Now a loudness is either a line of the
+ * document — the `volume` at the top, or the one in the state's own block — or this
+ * constant, which the row marks as the default when it is what applies.
+ */
+const DEFAULT_VOLUME = 0.5
+
+/**
+ * What each property of the document reads.
+ *
+ * The table is the document's type system, and the reader and the engine share it — a
+ * value the reader accepted is a value the engine can use without checking it again.
+ *
+ * `states` marks a property that only means something for some states; `suggest` is
+ * what a completion offers for a value whose set is open.
+ */
+const STYLE_SPEC = {
+  icon: { kind: 'word', words: ['on', 'off'] },
+  title: { kind: 'word', words: ['on', 'off'] },
+  sound: { kind: 'word', words: ['off', 'background', 'always'] },
+  'chime-gap': { kind: 'duration', min: 0, max: GAP_MAX, suggest: ['0s', '0.5s', '1s', '1.5s', '3s'] },
+  'keep-done': { kind: 'duration', min: 0, max: DONE_MAX, suggest: ['0s', '15s', '30s', '1m', '5m'] },
+  shape: { kind: 'word', words: SHAPES },
+  color: { kind: 'word', words: Object.keys(PRESET_COLORS) },
+  motion: { kind: 'word', words: MOTIONS },
+  speed: { kind: 'duration', min: SPEED_MIN, max: SPEED_MAX, suggest: ['0.5s', '1s', '1.5s', '2s', '3s', '5s'] },
+  chime: { kind: 'chime', states: CHIME_STATES },
+  volume: { kind: 'number', min: 0, max: 1, states: CHIME_STATES, suggest: ['0', '0.25', '0.5', '0.75', '1'] },
+}
+
+/** The vocabulary the reader and the editor are both built from. */
+const STYLE_DOCUMENT_OPTIONS = {
+  states: STYLE_STATES,
+  keys: { global: STYLE_GLOBAL_KEYS, state: STYLE_STATE_KEYS },
+  spec: STYLE_SPEC,
+}
+
+/** What an unconfigured install draws and plays. */
 const DEFAULT_STYLE = [
-  'running  circle  blue  turn   3',
-  'waiting  rounded amber blink  1.1',
-  'approval rounded amber blink  1.9',
-  'done     circle  green flush  1.6',
+  '// dsh-sentry: how each session state looks and sounds.',
+  '// Durations are seconds unless a unit is written: 1.5s, 300ms, 2m.',
+  '',
+  'icon on',
+  'title on',
+  'sound background',
+  'chime-gap 1.5s',
+  'keep-done 60s',
+  'volume 0.5',
+  '',
+  'waiting {',
+  '  shape rounded',
+  '  color amber',
+  '  motion blink',
+  '  speed 1.1s',
+  '  chime A5 E6',
+  '}',
+  '',
+  'approval {',
+  '  shape rounded',
+  '  color amber',
+  '  motion blink',
+  '  speed 1.9s',
+  '  chime A5',
+  '  volume 0.45',
+  '}',
+  '',
+  'running {',
+  '  shape circle',
+  '  color blue',
+  '  motion turn',
+  '  speed 3s',
+  '}',
+  '',
+  'done {',
+  '  shape circle',
+  '  color green',
+  '  motion pulse',
+  '  speed 1.6s',
+  '  chime A4',
+  '  volume 0.25',
+  '}',
 ].join('\n')
 
-/** The states a document may address, in the order the help text lists them. */
-const STYLE_STATES = ['running', 'waiting', 'approval', 'done']
-
 /**
- * The option keys a rule may write as `key=value`.
+ * Coerce one block's written values into something drawable.
  *
- * Declared once because two readers have to agree on it: `parseStyle` accepts
- * exactly these keys, and the editor's grammar offers exactly these — the grammar
- * takes the list as an option rather than carrying its own. Two lists that happen to
- * agree today is how a suggestion comes to offer a key the parser then reports.
- */
-const STYLE_OPTIONS = ['shape', 'color', 'pattern', 'motion', 'speed', 'bg']
-
-/**
- * Whether a bare token is a legal value for one positional slot.
+ * Almost nothing happens here, and that is the point: the reader that produced
+ * `rule` already refused every value it could not read, with a diagnostic, so what
+ * is left is a choice per property between what the document wrote and the shipped
+ * default. A property the document got wrong is not in the rule at all, which is
+ * what makes a typo degrade to the shipped appearance rather than to a broken SVG.
  *
- * The check exists so a typo is *reported* rather than quietly landing in a slot
- * whose coercion will later discard it. A line that says `nope` should say so;
- * silence would leave the user staring at an unchanged icon with no explanation.
- *
- * @param slot - the slot name.
- * @param token - the bare token.
- * @returns whether it fits.
- */
-function fitsSlot(slot, token) {
-  if (slot === 'shape') return SHAPES.includes(token)
-  if (slot === 'color') return PRESET_COLORS[token] !== undefined
-  if (slot === 'pattern') return PATTERNS.includes(token)
-  if (slot === 'motion') return MOTIONS_LIST.includes(token)
-  return Number.isFinite(Number.parseFloat(token))
-}
-
-/**
- * Parse one style document.
- *
- * A line is a state name followed by tokens. A token is either `key=value` or a
- * bare word, and a bare word is placed in the first slot the line has not filled:
- * shape, then colour, then pattern, then motion, then speed. Two shapes of token
- * are worth calling out because they read as one thing and set two:
- * `spokes=3` sets the pattern *and* its count, and a trailing bare number with
- * every other slot filled is the speed — so both `spokes=2 dot turn 3` and
- * `speed=3` mean what they look like.
- *
- * @param text - the document, or anything else a settings file happened to hold.
- * @returns `{ rules, problems }` — a rule per state, plus a human-readable note
- *   for every token that was ignored.
- */
-function parseStyle(text) {
-  const rules = {}
-  const problems = []
-  if (typeof text !== 'string' || text.trim() === '') return { rules, problems }
-
-  const POSITIONAL = ['shape', 'color', 'pattern', 'motion', 'speed']
-
-  let current
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.split('#')[0].trim()
-    if (line === '') continue
-    const tokens = line.split(/[\s,]+/).filter((token) => token !== '')
-    const name = tokens.shift()
-    if (name === undefined) continue
-
-    if (STYLE_STATES.includes(name)) {
-      current = { state: name }
-      rules[name] = current
-    } else {
-      problems.push(`unknown state "${name}"`)
-      current = undefined
-      continue
-    }
-
-    for (const token of tokens) {
-      const equals = token.indexOf('=')
-      const key = equals === -1 ? undefined : token.slice(0, equals)
-      const value = equals === -1 ? undefined : token.slice(equals + 1)
-
-      if (key !== undefined && STYLE_OPTIONS.includes(key)) {
-        // `pattern=none` is how a document says "carve nothing" now that the bare
-        // word belongs to the shape slot. It is the same fact either way.
-        current[key] = value
-        continue
-      }
-      // A token whose left side names a pattern is that pattern, with its count:
-      // `spokes=3` is what the shipped defaults used to say.
-      if (key !== undefined && PATTERNS.includes(key)) {
-        current.pattern = key
-        if (value !== '') current.marks = value
-        continue
-      }
-      if (key !== undefined) {
-        problems.push(`${name}: unknown option "${key}"`)
-        continue
-      }
-      if (PATTERNS.includes(token)) {
-        current.pattern = token
-        continue
-      }
-      if (MOTIONS_LIST.includes(token)) {
-        current.motion = token
-        continue
-      }
-      if (SHAPES.includes(token)) {
-        current.shape = token
-        continue
-      }
-      if (PRESET_COLORS[token] !== undefined) {
-        current.color = token
-        continue
-      }
-      // A bare number can only be the rate. Placing it in whatever slot happens to
-      // be free next would put it in `color` on a line that named a shape and a
-      // motion and skipped the rest — which is exactly the documented
-      // `running none turn 3`, and it used to be reported as an invalid colour.
-      if (Number.isFinite(Number.parseFloat(token))) {
-        current.speed = token
-        continue
-      }
-      const next = POSITIONAL.find((slot) => current[slot] === undefined)
-      if (next === undefined) problems.push(`${name}: unexpected "${token}"`)
-      else if (fitsSlot(next, token)) current[next] = token
-      else problems.push(`${name}: "${token}" is not a valid ${next}`)
-    }
-  }
-  return { rules, problems }
-}
-
-/**
- * Coerce one parsed rule into something drawable, or undefined to keep the
- * default. Every field is checked here rather than at draw time, so a bad value
- * degrades to the shipped appearance instead of to a broken SVG.
- *
- * @param rule - the parsed rule.
- * @param defaults - the shipped rule for that state.
+ * @param rule - the block as read, or undefined when the document has no block.
+ * @param defaults - the shipped look for that state.
  * @returns the resolved look.
  */
 function resolveLook(rule, defaults) {
   if (rule === undefined) return { ...defaults }
-
-  const shape = SHAPES.includes(rule.shape) ? rule.shape : defaults.shape
-  const color =
-    PRESET_COLORS[rule.color] !== undefined
-      ? rule.color
-      : PRESET_COLORS[rule.bg] !== undefined
-        ? rule.bg
-        : defaults.color
-  const pattern = PATTERNS.includes(rule.pattern) ? rule.pattern : defaults.pattern
-  const motion = MOTIONS_LIST.includes(rule.motion) ? rule.motion : defaults.motion
-  const speed = Number.parseFloat(rule.speed ?? '')
-
   return {
-    shape,
-    color,
-    pattern,
-    motion,
-    speed: Number.isFinite(speed) && speed >= 0.2 && speed <= 20 ? speed : defaults.speed,
+    shape: rule.shape ?? defaults.shape,
+    color: rule.color ?? defaults.color,
+    motion: rule.motion ?? defaults.motion,
+    speed: rule.speed ?? defaults.speed,
   }
 }
 
 /**
  * The shipped look per state, before any document is applied.
  *
- * These are the defaults the documentation quotes, and the ones a rule inherits
- * field by field: naming only a colour in a document keeps the shipped shape,
- * pattern, and motion for that state.
+ * These are the defaults the documentation quotes, and the ones a block inherits
+ * property by property: naming only a colour in a block keeps the shipped shape,
+ * motion, and rate for that state.
  *
- * `running` turns the **fish**, not a pattern. A dial-like ring of spokes was
- * tried and read as a watch face rather than as a state; the fish is the thing
- * this icon is about, so the fish is the thing that moves.
+ * `running` turns the **fish**, not a pattern. A dial-like ring of spokes was tried
+ * and read as a watch face rather than as a state; the fish is the thing this icon
+ * is about, so the fish is the thing that moves.
  */
 const DEFAULT_LOOK = {
-  running: { shape: 'circle', color: 'blue', pattern: 'none', motion: 'turn', speed: 3 },
-  waiting: { shape: 'rounded', color: 'amber', pattern: 'none', motion: 'blink', speed: 1.1 },
-  approval: { shape: 'rounded', color: 'amber', pattern: 'none', motion: 'blink', speed: 1.9 },
-  done: { shape: 'circle', color: 'green', pattern: 'none', motion: 'flush', speed: 1.6 },
+  waiting: { shape: 'rounded', color: 'amber', motion: 'blink', speed: 1.1 },
+  approval: { shape: 'rounded', color: 'amber', motion: 'blink', speed: 1.9 },
+  running: { shape: 'circle', color: 'blue', motion: 'turn', speed: 3 },
+  done: { shape: 'circle', color: 'green', motion: 'pulse', speed: 1.6 },
 }
 
-/** The appearance a document resolves to, per state. */
-const STYLE_FALLBACK_LOOK = { shape: 'none', color: 'gray', pattern: 'none', motion: 'still', speed: 1 }
+/**
+ * The shipped chime per state, before any document is applied.
+ *
+ * The notes only, deliberately. A state's loudness is a `volume` line — the document's
+ * default or its own block's — and keeping a third set of numbers here is how the row
+ * came to print figures that were in no document at all.
+ */
+const DEFAULT_CHIME = {
+  waiting: { labels: ['A5', 'E6'], frequencies: [880, 1318.51] },
+  approval: { labels: ['A5'], frequencies: [880] },
+  done: { labels: ['A4'], frequencies: [440] },
+}
+
+/** The shipped document-level settings. */
+const DEFAULT_GLOBALS = {
+  icon: true,
+  title: true,
+  sound: 'background',
+  chimeGapMs: SOUND_GAP_MS,
+  keepDoneMs: DEFAULT_DONE_WINDOW_MS,
+  volume: DEFAULT_VOLUME,
+}
+
+/**
+ * Resolve the document's own settings.
+ * @param written - the values the document wrote at the top level.
+ * @returns every document setting, with the shipped value filled in.
+ */
+function resolveGlobals(written) {
+  return {
+    icon: written.icon !== 'off',
+    title: written.title !== 'off',
+    sound: written.sound ?? DEFAULT_GLOBALS.sound,
+    chimeGapMs: Math.round((written['chime-gap'] ?? DEFAULT_GLOBALS.chimeGapMs / 1000) * 1000),
+    keepDoneMs: Math.round((written['keep-done'] ?? DEFAULT_GLOBALS.keepDoneMs / 1000) * 1000),
+    volume: written.volume ?? DEFAULT_VOLUME,
+  }
+}
+
+/**
+ * Resolve the chimes a document asks for.
+ *
+ * A state is in `channels` exactly when it has something to play, so `chime off`
+ * removes the entry rather than marking it silent — one thing to check at play time
+ * instead of two.
+ *
+ * A state's loudness is its own `volume` line, or the document's, and **never a
+ * product of the two**: both spellings are the same kind of number, so the percentage
+ * the row prints is always one a reader can find by reading the document. `unstated`
+ * marks the single case where that is not true — no `volume` anywhere — and the row
+ * says so rather than printing a figure with no source.
+ *
+ * @param written - the values the document wrote at the top level.
+ * @param rules - the blocks as read.
+ * @returns `{ when, gapMs, channels }`.
+ */
+function resolveSound(written, rules) {
+  const channels = {}
+  for (const state of CHIME_STATES) {
+    const block = rules[state]
+    const chosen = block?.chime
+    if (chosen !== undefined && chosen.silent === true) continue
+    const spec = chosen ?? DEFAULT_CHIME[state]
+    const written_ = block?.volume ?? written.volume
+    channels[state] = {
+      labels: spec.labels,
+      frequencies: spec.frequencies,
+      gain: round2(written_ ?? DEFAULT_VOLUME),
+      unstated: written_ === undefined,
+    }
+  }
+  return {
+    when: written.sound ?? DEFAULT_GLOBALS.sound,
+    gapMs: Math.round((written['chime-gap'] ?? DEFAULT_GLOBALS.chimeGapMs / 1000) * 1000),
+    channels,
+  }
+}
 
 /**
  * Resolve a whole document against the shipped defaults.
+ *
+ * The single entry point for both halves of the plugin: the engine draws from
+ * `look`, plays from `sound`, and schedules from `globals`, while the settings row
+ * prints `problems` and previews the same `look`. Reading it twice would be reading
+ * it two ways.
+ *
  * @param text - the document.
- * @returns `{ look, problems }` — a resolved appearance per state.
+ * @returns `{ look, globals, sound, problems, document }` — a resolved appearance
+ *   per state, the resolved document settings, the resolved chimes, and every
+ *   problem the reader found.
  */
 function resolveStyle(text) {
-  const { rules, problems } = parseStyle(text)
+  const document = readStyleDocument(text, STYLE_DOCUMENT_OPTIONS)
   const look = {}
   for (const state of STYLE_STATES) {
-    look[state] = resolveLook(rules[state], DEFAULT_LOOK[state])
+    look[state] = resolveLook(document.rules[state], DEFAULT_LOOK[state])
   }
-  look.fallback = resolveLook(undefined, STYLE_FALLBACK_LOOK)
-  return { look, problems }
+  const globals = resolveGlobals(document.globals)
+  return {
+    look,
+    globals,
+    sound: resolveSound(document.globals, document.rules),
+    problems: document.problems,
+    document,
+  }
 }
 
 // ─── the primitives ──────────────────────────────────────────────────────────
@@ -521,44 +593,16 @@ function backgroundShape(look) {
 }
 
 /**
- * The carved pattern for one look.
- *
- * Every mark is drawn black, because black is what the mask cuts away: the
- * background is the only thing with a colour, and everything carved out of it
- * shows the tab bar through. That is the whole reason the icon survives a browser
- * theme this plugin cannot see.
- *
- * Nothing here survives the vocabulary except the fish, which is carved by
- * {@link sentryFavicon} itself rather than by this function. The dial-like
- * patterns this used to draw — spokes, hands, petals, windmill, dots, rays — were
- * all tried at the real 16px size and all of them read as noise around a fish
- * nobody could then see. A shape slot with one legal value is not a wasted slot:
- * it is the record of a question that got answered.
- *
- * @param look - the resolved appearance.
- * @returns the SVG elements.
- */
-function patternShapes(look) {
-  void look
-  return ''
-}
-
-/**
  * The motion for one look, as a **static** animation element.
  *
- * Only `turn` is left to SMIL, and only because it is stateless: a rotating group
- * is the same drawing at every instant, so a declarative animation costs nothing
- * and needs no bookkeeping. `blink` and `flush` change something the drawing
- * itself carries — a dim flag, a pulsing colour — and are driven by
- * {@link motionTick} instead.
- *
- * That split is not an aesthetic choice. A favicon is rendered in a document the
- * page does not own, and the motion categories do not have equal standing there:
- * the first version of this relied on a transform animation for the spin and on
- * presentation animations for the pulse, and was reported as "the animation does
- * not move". Driving the repaint from the plugin removes the question entirely —
- * the plugin already rebuilds the data URL on every state change, so a motion
- * that is a function of time is the same code path with a timer in front of it.
+ * There is none, and that is a finding rather than an omission. A favicon is
+ * rendered in a document this plugin does not own, and the motion categories do
+ * not have equal standing there: the first version of this declared a
+ * `<animateTransform>` for the spin and a presentation animation for the pulse,
+ * and the spin was reported as "the animation does not move" while the pulse
+ * worked. Every motion is therefore a {@link motionTick} the plugin drives, which
+ * is one code path for all of them instead of a per-motion bet on what the
+ * browser's favicon document supports.
  *
  * @param look - the resolved appearance.
  * @param reducedMotion - whether the user asked for less movement.
@@ -572,11 +616,15 @@ function motionElement(look, reducedMotion) {
 const TICK_MS = 120
 
 /**
- * The colour a `flush` pulses toward.
+ * The colour a `pulse` moves toward.
+ *
+ * Green pulses toward blue and everything else toward green, which keeps the two
+ * states that use `pulse` visibly different from each other without a second
+ * palette: a change of colour is what says "something is happening".
  * @param name - the preset name.
  * @returns the partner hex.
  */
-function flushPartner(name) {
+function pulsePartner(name) {
   return name === 'green' ? PRESET_COLORS.blue : PRESET_COLORS.green
 }
 
@@ -586,9 +634,9 @@ function flushPartner(name) {
  * The result is handed straight to {@link sentryFavicon}, which makes a motion a
  * function from a tick count to an appearance and nothing else — and therefore
  * verifiable in Node, with no browser and no clock: `blink` dims on alternate
- * half-periods, `flush` alternates the colour once per period, and `turn` steps
- * the angle. Every rate is expressed in the seconds the DSL's `speed` already
- * means, so a document that says `blink 1.1` still gets a 1.1-second breath.
+ * half-periods, `pulse` alternates the colour once per period, and `turn` steps
+ * the angle. Every rate is expressed in the seconds the document's `speed` already
+ * means, so a block that says `speed 1.1s` gets a 1.1-second breath.
  *
  * @param look - the resolved appearance.
  * @param tick - a monotonically increasing tick count.
@@ -600,10 +648,10 @@ function motionTick(look, tick) {
     const halfTicks = Math.max(1, Math.round(((look.speed * 1000) / 2) / TICK_MS))
     return { dim: Math.floor(tick / halfTicks) % 2 === 1 }
   }
-  if (look.motion === 'flush') {
+  if (look.motion === 'pulse') {
     const ticks = Math.max(1, Math.round((look.speed * 1000) / TICK_MS))
     return {
-      color: Math.floor(tick / ticks) % 2 === 1 ? flushPartner(look.color) : PRESET_COLORS[look.color],
+      color: Math.floor(tick / ticks) % 2 === 1 ? pulsePartner(look.color) : PRESET_COLORS[look.color],
     }
   }
   if (look.motion === 'turn') {
@@ -643,8 +691,20 @@ function round2(value) {
   return Math.round(value * 100) / 100
 }
 /**
- * The fish's own scale: the shipped art is a 50×50 drawing, so placing it at full
- * size in the 32px canvas is exactly `32/50`.
+ * The art's own canvas, in its own units.
+ *
+ * The shipped favicon is a `viewBox="0 0 50 50"` drawing — its path data reaches
+ * 49.37 — so the fish's centre is at 25 in its own space, and its full size in the
+ * 32px canvas is `32/50`. Both numbers come from this one constant, because
+ * conflating them is the bug it exists to end: the placement used to centre the art
+ * as if it were a 32-unit drawing, which pushed the fish 5.76px down and to the right
+ * at full size — the bottom-right corner of the rounded square it was reported from —
+ * and cut its nose and tail off against the rim.
+ */
+const FISH_ART_EXTENT = 50
+
+/**
+ * The fish's own scale: a 50-unit drawing placed at full size in a 32px canvas.
  *
  * This is the whole point of the icon. At the 0.416 the first version used, the
  * fish occupied 41% of the canvas and the ring took the rest — measured on a real
@@ -656,7 +716,7 @@ function round2(value) {
  * precisely so that this is legible rather than cramped — there is no stroke to
  * collide with, only the tab bar showing through.
  */
-const FISH_FULL_SCALE = 32 / 50
+const FISH_FULL_SCALE = 32 / FISH_ART_EXTENT
 
 /**
  * The art's largest half-extent, in its own 50-unit space.
@@ -721,8 +781,8 @@ function activeLook(plan, style) {
 }
 
 /**
- * The favicon, as an SVG string: a state-coloured background with the fish and the
- * state's pattern carved out of it.
+ * The favicon, as an SVG string: a state-coloured background with the fish carved
+ * out of it.
  *
  * The fish is **negative space**, not a painted glyph. That decision is what makes
  * the icon work at 16px: the silhouette is the tab bar showing through, so it is
@@ -742,8 +802,10 @@ function sentryFavicon(plan, options) {
   const { reducedMotion, style, motion = {} } = options
   const chosen = activeLook(plan, style)
 
-  // The fish, centered by construction: the translate puts the art's own 50-unit
-  // centre on the canvas centre, so no margin arithmetic can drift it.
+  // The fish, centred by construction: the scale takes the art from its own units to
+  // canvas units, and the translate adds exactly the margin that puts the art's own
+  // centre — 25 in its own space, not 16 — on the canvas centre. Both of those numbers
+  // come from `FISH_ART_EXTENT`, so no margin arithmetic can drift them apart.
   //
   // A `turn` rotates the fish itself, about the canvas centre. That is the state
   // indicator the running state gets: the icon is *about* this glyph, so the glyph
@@ -752,9 +814,8 @@ function sentryFavicon(plan, options) {
   // (see {@link FISH_TURN_SCALE}).
   const spin = motion.angle === undefined || motion.angle === 0 ? 0 : round2(motion.angle)
   const scale = spin === 0 ? FISH_FULL_SCALE : FISH_FULL_SCALE * FISH_TURN_SCALE
-  const shift = round2(16 - 16 * scale)
-  const placed =
-    `translate(${String(shift)} ${String(shift)}) scale(${String(scale)}) translate(-16 -16) translate(16 16)`
+  const shift = round2(16 - (FISH_ART_EXTENT / 2) * scale)
+  const placed = `translate(${String(shift)} ${String(shift)}) scale(${String(scale)})`
   const fish = `<g transform="${placed}"><path d="${FISH_PATH}" fill="#000" fill-rule="nonzero"/></g>`
 
   // The mask is the background: everything drawn on it in black is carved out, so
@@ -762,8 +823,7 @@ function sentryFavicon(plan, options) {
   // through. Rotating it here rather than on the painted layer is what keeps the
   // background's outline still — a turning background would read as a spinning
   // badge, not as a working fish.
-  const carvings =
-    spin === 0 ? fish : `<g transform="rotate(${String(spin)} 16 16)">${fish}</g>` + patternShapes(chosen)
+  const carvings = spin === 0 ? fish : `<g transform="rotate(${String(spin)} 16 16)">${fish}</g>`
 
   const mask =
     `<mask id="disc" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">` +
@@ -883,51 +943,75 @@ function titleWithStatus(current, plan, t) {
 // ─── the sound ───────────────────────────────────────────────────────────────
 
 /**
- * The chime table: what each alert sounds like, synthesized rather than shipped.
+ * The chime is synthesized, and the notes it plays come from the document.
  *
- * Two short notes rising for a question — the one alert that means "stop what you
- * are doing" — a single note for an approval, and one soft low note for a
- * completion, which is information rather than a demand. The frequencies are the
- * equal-tempered A5 and E6, so the two-note chime is a real musical interval
- * rather than two arbitrary beeps.
+ * The document names notes, not waveforms: `chime A5 E6` is a rising interval, and
+ * these two constants decide how a sequence of notes becomes a sound. They are
+ * deliberately not part of the language — a chime is a chime, and a document that
+ * had to spell out a per-note envelope would be a synthesizer patch rather than a
+ * notification setting.
  */
-const CHIME_NOTES = {
-  questions: [
-    { frequency: 880, startMs: 0, durationMs: 110, peak: 1 },
-    { frequency: 1318.5, startMs: 95, durationMs: 150, peak: 0.9 },
-  ],
-  approvals: [{ frequency: 880, startMs: 0, durationMs: 130, peak: 0.85 }],
-  completed: [{ frequency: 440, startMs: 0, durationMs: 110, peak: 0.45 }],
+
+/** How far apart two notes of one chime start, in milliseconds. */
+const CHIME_STAGGER_MS = 90
+
+/** How long one note rings, in milliseconds. */
+const CHIME_NOTE_MS = 130
+
+/**
+ * One state's chime as a list of notes to schedule.
+ *
+ * @param frequencies - the frequencies the document named, in the order written.
+ * @returns `{ frequency, startMs, durationMs }` per note.
+ */
+function chimeNotes(frequencies) {
+  return frequencies.map((frequency, index) => ({
+    frequency,
+    startMs: index * CHIME_STAGGER_MS,
+    durationMs: CHIME_NOTE_MS,
+  }))
 }
 
 /**
- * Which alert, if any, may make a sound right now.
+ * Which chime, if any, may sound right now.
  *
- * Two rules, both deliberate and both easy to get wrong:
+ * Three rules, all deliberate and all easy to get wrong:
  *
- * - **Foreground is silence.** When the user is looking at the interface the
- *   favicon and the title have already said it, and a chime on top of that is
- *   noise. Only a hidden document or an unfocused window earns a sound — and the
- *   `soundBlocked` setting is how a user who disagrees turns the rule off.
- * - **One sound per burst.** Agents ask several questions in a row; three chimes
- *   in three seconds reads as a malfunction. The gap is measured against a
+ * - **The document decides whether sound is on at all.** `sound off` silences
+ *   everything, `sound background` (the shipped value) chimes only while this page
+ *   is hidden or unfocused, and `sound always` chimes regardless. The reasoning
+ *   behind the default: while the user is looking at the interface the favicon and
+ *   the title have already said it, and a chime on top of that is noise.
+ * - **One sound per burst.** Agents ask several questions in a row; three chimes in
+ *   three seconds reads as a malfunction. The gap is measured against a
  *   caller-supplied clock instead of a timer, because a background tab throttles
  *   `setTimeout` to the minute and a timer-based gap would fire late or not at all.
+ * - **A state with no chime is skipped, not silencing.** `chime off` in the
+ *   `waiting` block must not suppress the approval that arrives in the same burst,
+ *   which is why this walks the three events in order and takes the first one that
+ *   has both an alert and a sound.
  *
  * @param alerts - the alert set from {@link changeAlerts}.
- * @param settings - the resolved settings section.
+ * @param sound - the resolved chime configuration.
  * @param state - `{ now, lastSoundAt, hidden, focused }`.
- * @returns the chime kind to play, or undefined for silence.
+ * @returns `{ channel, labels, frequencies, gain }`, or undefined for silence.
  */
-function soundPlan(alerts, settings, state) {
-  if (settings.sound === false) return undefined
-  if (settings.soundBlocked !== false && !state.hidden && state.focused) return undefined
-  if (typeof state.lastSoundAt === 'number' && state.now - state.lastSoundAt < SOUND_GAP_MS) {
+function soundPlan(alerts, sound, state) {
+  if (sound.when === 'off') return undefined
+  if (sound.when === 'background' && !state.hidden && state.focused) return undefined
+  if (typeof state.lastSoundAt === 'number' && state.now - state.lastSoundAt < sound.gapMs) {
     return undefined
   }
-  if (alerts.questions.length > 0 && settings.soundWaiting !== false) return 'questions'
-  if (alerts.approvals.length > 0 && settings.soundApproval !== false) return 'approvals'
-  if (alerts.completed.length > 0 && settings.soundDone === true) return 'completed'
+  /** The three events, most urgent first. */
+  const events = [
+    ['waiting', alerts.questions],
+    ['approval', alerts.approvals],
+    ['done', alerts.completed],
+  ]
+  for (const [channel, list] of events) {
+    const chosen = sound.channels[channel]
+    if (list.length > 0 && chosen !== undefined) return { channel, ...chosen }
+  }
   return undefined
 }
 
@@ -940,13 +1024,13 @@ function soundPlan(alerts, settings, state) {
  * enough to make it audible. A chime requested in that window is *dropped* rather
  * than queued — a chime that arrives two minutes late, after the click that
  * finally unlocked audio, is worse than no chime. The settings row's preview
- * button exists partly to be the gesture that unlocks this for the session.
+ * buttons exist partly to be the gesture that unlocks this for the session.
  *
- * @param options - `{ AudioContextClass, volume }`, both injectable for tests.
+ * @param options - `{ AudioContextClass }`, injectable so the tests can drive a fake.
  * @returns the player: `{ play, resume, dispose }`.
  */
 function createChime(options) {
-  const { AudioContextClass, volume } = options
+  const { AudioContextClass } = options
   let context
 
   /** Build the context lazily, and never let a construction failure escape. */
@@ -975,16 +1059,17 @@ function createChime(options) {
 
     /**
      * Play one chime, if the context is running.
-     * @param kind - a key of {@link CHIME_NOTES}.
+     * @param frequencies - the notes to schedule, in the order written.
+     * @param gain - the loudness to play them at, 0 to 1.
      * @returns whether a sound was actually scheduled.
      */
-    play(kind) {
+    play(frequencies, gain) {
       const audio = ensure()
       if (audio === undefined) return false
       player.resume()
       if (audio.state === 'suspended') return false
-      const notes = CHIME_NOTES[kind] ?? []
-      const gain = typeof volume === 'number' ? volume : 0.5
+      const notes = chimeNotes(frequencies ?? [])
+      const level = typeof gain === 'number' ? gain : DEFAULT_VOLUME
       const startedAt = audio.currentTime
       for (const note of notes) {
         const begin = startedAt + note.startMs / 1000
@@ -996,7 +1081,7 @@ function createChime(options) {
         // A bare gate on a sine wave clicks; a short attack and a longer release
         // is what makes it read as a chime rather than as a pop.
         envelope.gain.setValueAtTime(0, begin)
-        envelope.gain.linearRampToValueAtTime(note.peak * gain, begin + 0.012)
+        envelope.gain.linearRampToValueAtTime(level, begin + 0.012)
         envelope.gain.exponentialRampToValueAtTime(0.0001, end)
         oscillator.connect(envelope)
         envelope.connect(audio.destination)
@@ -1106,30 +1191,20 @@ function noteRunningEdges(prevRunning, list, stamps, now) {
 /**
  * Every setting this plugin owns, in the order the row lists them.
  *
- * The ids are also the host schema's field names, and the two halves of the
- * bundle are separate graphs that cannot share a module — so the list is
- * duplicated by hand in `lib/index.js` and `scripts/verify-client.mjs` compares
- * the two copies, which turns a silent drift (a switch that writes a key no
- * engine reads) into a failing check.
+ * There is exactly one, and that is the design rather than an accident of it: the
+ * document says how each state looks and sounds, and a document plus a row of
+ * switches over the same facts is two places to look for one answer. The switches
+ * this row used to carry are now lines — `icon on`, `sound background`,
+ * `keep-done 60s`, `chime off` — which means every knob still exists and every one
+ * of them is visible next to the thing it affects.
  *
- * Every channel defaults to on, on the principle that a feature nobody can
- * discover is a feature nobody has: each switch is there to get out of the way
- * once the notice has been noticed, not to gate the plugin behind a setup step.
- * The completion chime is the easiest one to want off — a finished turn is
- * ambient information, and chiming on every one is how people end up muting
- * everything — so its hint says so and it sits last in the sound group.
+ * The id is also the host schema's field name, and the two halves of the bundle are
+ * separate graphs that cannot share a module — so the roster is duplicated by hand
+ * in `lib/index.js` and `scripts/verify-client.mjs` compares the two copies, which
+ * turns a silent drift into a failing check.
  */
 const SETTINGS = [
-  { id: 'favicon', kind: 'boolean', default: true, labelKey: 'alert.setting.favicon', hintKey: 'alert.setting.faviconHint' },
   { id: 'style', kind: 'text', default: DEFAULT_STYLE, labelKey: 'alert.setting.style', hintKey: 'alert.setting.styleHint' },
-  { id: 'title', kind: 'boolean', default: true, labelKey: 'alert.setting.title', hintKey: 'alert.setting.titleHint' },
-  { id: 'sound', kind: 'boolean', default: true, labelKey: 'alert.setting.sound', hintKey: 'alert.setting.soundHint' },
-  { id: 'soundWaiting', kind: 'boolean', default: true, labelKey: 'alert.setting.soundWaiting', hintKey: 'alert.setting.soundWaitingHint' },
-  { id: 'soundApproval', kind: 'boolean', default: true, labelKey: 'alert.setting.soundApproval', hintKey: 'alert.setting.soundApprovalHint' },
-  { id: 'soundDone', kind: 'boolean', default: true, labelKey: 'alert.setting.soundDone', hintKey: 'alert.setting.soundDoneHint' },
-  { id: 'soundBlocked', kind: 'boolean', default: true, labelKey: 'alert.setting.soundBlocked', hintKey: 'alert.setting.soundBlockedHint' },
-  { id: 'volume', kind: 'number', default: 0.5, labelKey: 'alert.setting.volume', hintKey: 'alert.setting.volumeHint' },
-  { id: 'doneWindowMs', kind: 'number', default: DEFAULT_DONE_WINDOW_MS, labelKey: 'alert.setting.doneWindow', hintKey: 'alert.setting.doneWindowHint' },
 ]
 
 /** The whole-section defaults, as the host schema resolves an empty document. */
@@ -1139,9 +1214,10 @@ const SETTING_DEFAULTS = Object.fromEntries(SETTINGS.map((field) => [field.id, f
  * Coerce one stored value to the shape the engine reads.
  *
  * The settings document is user-editable YAML and the wire carries whatever it
- * holds, so a numeric field accepts a numeric string and an out-of-range value is
- * clamped rather than rejected: a typo in `settings.yaml` should shrink the fish,
- * not disable the favicon.
+ * holds, so the coercions here are about surviving a hand-edit rather than about
+ * validating the document: the document has its own reader, with diagnostics, and
+ * this must not be a second opinion about it. A field that says nothing is left out
+ * so the default stands.
  *
  * @param field - the roster entry.
  * @param value - the stored value.
@@ -1158,10 +1234,7 @@ function coerceSetting(field, value) {
   // "draw an empty icon".
   if (field.kind === 'text') return typeof value === 'string' && value.trim() !== '' ? value : undefined
   const numeric = typeof value === 'number' ? value : Number.parseFloat(value)
-  if (!Number.isFinite(numeric)) return undefined
-  if (field.id === 'volume') return Math.min(1, Math.max(0, numeric))
-  if (field.id === 'doneWindowMs') return Math.min(600_000, Math.max(0, numeric))
-  return numeric
+  return Number.isFinite(numeric) ? numeric : undefined
 }
 
 /**
@@ -1186,57 +1259,48 @@ const zh = {
   'alert.title': '标签页提醒',
   'alert.description':
     '在别的标签页时替你盯着所有会话：标签图标、标签标题和提示音三个通道，该你出手的时候叫你回来',
-  'alert.setting.favicon': '标签图标状态样式',
-  'alert.setting.faviconHint':
-    '关掉就恢复成原来的 favicon。开启时标签图标是一块纯色背景，鱼和状态图案从背景里镂空出来 —— 所以鱼的轮廓永远是标签栏透出来的颜色，任何主题下都看得清。具体的颜色、形状、图案和动效由下面的样式文档决定。',
-  'alert.setting.style': '样式文档',
+  'alert.setting.style': '状态样式与声音',
   'alert.setting.styleHint':
-    '每个状态一行，四行决定四种状态的样子。写错的关键字会被忽略并退回默认值，不会让图标消失。展开下方说明可查全部可用的原语。',
-  'alert.style.help': '语法与原语说明',
-  'alert.style.syntax': '语法',
-  'alert.style.syntaxLine1': '每行一个状态：状态 形状 颜色 动效 速度',
-  'alert.style.syntaxLine2': '形状/颜色/动效可以按顺序写，也可以写成 键=值；数字一定是速度（秒）。例如 shape=none 或 rounded purple turn 1.4',
-  'alert.style.syntaxLine3': '# 开头是注释；没写的字段沿用该状态的默认值；同一行里后面的值覆盖前面的',
+    '四个状态各写一段，样子和声音都在里面。写错的那一行会被指出来并退回默认值，不会让图标消失。',
+  'alert.style.help': '文档语法',
+  'alert.style.document': '文档结构',
+  'alert.style.documentLine1': '文档级设置写在最前面，一行一条：icon on',
+  'alert.style.documentLine2': '每个状态一段：状态名 + {，属性一行一条，最后用单独一行 } 收尾',
+  'alert.style.documentLine3': '// 后面是注释；没写的属性沿用该状态的默认值',
+  'alert.style.globals': '文档级设置',
+  'alert.style.globalsLine':
+    'icon、title 写 on 或 off；sound 写 off、background（默认：只在本页不在前台时响）或 always；chime-gap 是两次提示音的最小间隔；keep-done 是「刚刚完成」保留多久；volume 是默认音量 —— 没在自己块里写 volume 的状态用它。',
+  'alert.style.state': '状态属性',
+  'alert.style.stateLine':
+    'shape、color、motion、speed、chime、volume。时长写单位（1.5s、300ms、2m），省略即秒。',
   'alert.style.shapes': '形状 shape',
-  'alert.style.patterns': '图案 pattern（目前只剩 none，试过的表盘类图案在 16px 下都只是噪点）',
   'alert.style.motions': '动效 motion',
   'alert.style.colors': '颜色 color（预设）',
   'alert.style.colorsLine': '只接受预设名，不接受任意色值：本插件出过的两次事故都是对比度问题（白鱼画在白底上），预设色不会犯这个错。',
-  'alert.style.defaults': '各状态默认值',
+  'alert.style.chime': '声音 chime',
+  'alert.style.chimeLine':
+    '写音名序列（A5 E6）或频率（880 1318.5），按顺序播放；off 表示这个状态不出声。同一个块里的 volume 是这个状态自己的音量（0–1），会覆盖顶层那行默认音量；卡片上印的就是这两个数字里生效的那一个，两边都没写才用出厂 0.5 并标「（默认）」。',
   'alert.primitive.shape.circle': '圆形',
   'alert.primitive.shape.rounded': '圆角矩形，鱼是横宽的，圆角矩形给它更好的留白',
   'alert.primitive.shape.square': '小圆角方形',
   'alert.primitive.shape.none': '不画背景板。注意：鱼是「镂空」出来的，没有背景板就没有东西可镂 —— 结果是整个图标全透明（只剩角标）。想「只要鱼」请用圆角矩形或圆形',
   'alert.primitive.motion.still': '不动',
-  'alert.primitive.motion.turn': '图案旋转，速度=转一圈的秒数',
-  'alert.primitive.motion.blink': '整体闪烁，速度=一次呼吸的秒数',
-  'alert.primitive.motion.flush': '背景色往复变化，速度=一个来回的秒数',
-  'alert.setting.title': '标签标题前缀',
-  'alert.setting.titleHint':
-    '在标签标题前面加上状态，例如“① 等待回答 · 我的会话 — DeepSeek Harness”。标签文字是唯一能读到准确数字的地方，和图标配合使用。',
-  'alert.setting.sound': '声音提醒',
-  'alert.setting.soundHint':
-    '总开关。注意浏览器的自动播放策略：在你第一次点击本界面之前，提示音无法发声，这是浏览器的限制而不是插件的问题。',
-  'alert.setting.soundWaiting': '等待回答时提示',
-  'alert.setting.soundWaitingHint':
-    '模型提问时播放一段上扬的双音，这是唯一表示“需要你立刻做决定”的声音。',
-  'alert.setting.soundApproval': '等待审批时提示',
-  'alert.setting.soundApprovalHint': '模型请求权限升级时播放一个单音。',
-  'alert.setting.soundDone': '会话完成时提示',
-  'alert.setting.soundDoneHint':
-    '模型跑完一轮时播放一声很轻的低音。它属于背景信息，如果觉得吵，这里是第一个该关掉的开关。',
-  'alert.setting.soundBlocked': '仅在本页不在前台时发声',
-  'alert.setting.soundBlockedHint':
-    '默认开启。你正看着这个界面时，标签图标和标题已经说明了一切，再响一声就是打扰；关闭后无论如何都会发声。',
-  'alert.setting.volume': '音量',
-  'alert.setting.volumeHint': '提示音的音量，0 到 1。',
-  'alert.setting.doneWindow': '完成状态保留时间',
-  'alert.setting.doneWindowHint':
-    '会话结束后保持绿色信号多久（毫秒）。默认 60000，即一分钟；调大可以让“刚刚完成”更容易被注意到。',
-  'alert.setting.preview': '试听',
-  'alert.setting.previewHint': '播放一次提示音，同时完成浏览器的音频解锁。',
-  'alert.on': '已开启',
-  'alert.off': '已关闭',
+  'alert.primitive.motion.turn': '鱼旋转，速度=转一圈的秒数',
+  'alert.primitive.motion.blink': '整体明暗呼吸，速度=一次呼吸的秒数',
+  'alert.primitive.motion.pulse': '背景色往复变化，速度=一个来回的秒数',
+  'alert.preview': '状态预览',
+  'alert.preview.hint':
+    '32 像素，和标签页里一样大；动效按文档实时播放。点「预览」让标签页本身显示这个状态（图标和标题都换过去），再点一次或离开本页就恢复。',
+  'alert.preview.audition': '试听',
+  'alert.preview.silent': '不出声',
+  'alert.preview.gain': '音量',
+  'alert.preview.fallback': '（默认）',
+  'alert.preview.pin': '预览',
+  'alert.preview.pinHint': '让浏览器标签页显示这个状态，改配置时可以照着标签看',
+  'alert.preview.pinned': '预览中',
+  'alert.preview.pinnedHint': '标签页正在显示这个状态；再点一次恢复真实状态',
+  'alert.problems': '下面这些行没有生效：',
+  'alert.problemsMore': '处没有列出',
   'alert.reset': '全部恢复默认',
   'alert.status.waiting': '等待回答',
   'alert.status.approval': '等待审批',
@@ -1249,57 +1313,48 @@ const en = {
   'alert.title': 'Tab alerts',
   'alert.description':
     'Watches every session while you are on another tab — a status ring on the tab icon, a title prefix, and a chime, so you come back when you are actually needed',
-  'alert.setting.favicon': 'Tab icon styling',
-  'alert.setting.faviconHint':
-    'Turn this off to restore the original favicon. When on, the tab icon is a solid background with the fish and the state pattern carved out of it — so the fish always shows the tab bar through and stays legible in any theme. Colours, shapes, patterns, and motion come from the style document below.',
-  'alert.setting.style': 'Style document',
+  'alert.setting.style': 'State styles and sounds',
   'alert.setting.styleHint':
-    'One line per state; four lines decide how the four states look. An unknown keyword is ignored and falls back to the default rather than leaving the tab without an icon. Expand the reference below for the full vocabulary.',
-  'alert.style.help': 'Syntax and primitives',
-  'alert.style.syntax': 'Syntax',
-  'alert.style.syntaxLine1': 'one line per state: state shape colour motion speed',
-  'alert.style.syntaxLine2': 'shape, colour, and motion may be positional or written as key=value; a bare number is always the speed, e.g. shape=none or rounded purple turn 1.4',
-  'alert.style.syntaxLine3': '# starts a comment; anything a line omits keeps that state\u2019s default, and a later value on the same line wins',
+    'One block per state, each line one named property. A line the reader cannot use is reported and falls back to the default rather than leaving the tab without an icon.',
+  'alert.style.help': 'Document syntax',
+  'alert.style.document': 'How the document is shaped',
+  'alert.style.documentLine1': 'document settings come first, one per line: icon on',
+  'alert.style.documentLine2': 'then one block per state: the state name and {, one property per line, closed by a line with }',
+  'alert.style.documentLine3': '// starts a comment; a property a block omits keeps that state\u2019s default',
+  'alert.style.globals': 'Document settings',
+  'alert.style.globalsLine':
+    'icon and title take on or off; sound takes off, background (the default: only while this page is not in front) or always; chime-gap is the least time between two chimes; keep-done is how long "just finished" stays lit; volume is the loudness a state uses when its own block does not name one.',
+  'alert.style.state': 'State properties',
+  'alert.style.stateLine':
+    'shape, color, motion, speed, chime, volume. Durations take a unit (1.5s, 300ms, 2m); a bare number is seconds.',
   'alert.style.shapes': 'shape',
-  'alert.style.patterns': 'pattern (only none remains; every dial-like pattern read as noise at 16px)',
   'alert.style.motions': 'motion',
   'alert.style.colors': 'colour (presets)',
   'alert.style.colorsLine': 'Preset names only, never a free colour: both failures this plugin has shipped were contrast failures, and a preset cannot be illegible.',
-  'alert.style.defaults': 'Shipped defaults',
+  'alert.style.chime': 'chime',
+  'alert.style.chimeLine':
+    'Note names (A5 E6) or frequencies (880 1318.5), played in order; off keeps this state silent. A block\u2019s volume is that state\u2019s own loudness, 0 to 1, and it overrides the document\u2019s; the card prints whichever of the two is in force, and marks it as the default only when neither is written.',
   'alert.primitive.shape.circle': 'a circle',
   'alert.primitive.shape.rounded': 'a rounded square — the fish is wider than it is tall, and this gives it room',
   'alert.primitive.shape.square': 'a slightly rounded square',
   'alert.primitive.shape.none': 'no background plate. The fish is carved OUT of the background, so with no background there is nothing to carve and the icon is entirely transparent (only the badge survives). For just-the-fish, use rounded or circle',
   'alert.primitive.motion.still': 'still',
-  'alert.primitive.motion.turn': 'the pattern turns; speed is seconds per revolution',
-  'alert.primitive.motion.blink': 'the whole icon blinks; speed is seconds per breath',
-  'alert.primitive.motion.flush': 'the background colour pulses; speed is seconds per cycle',
-  'alert.setting.title': 'Tab title prefix',
-  'alert.setting.titleHint':
-    'Prefixes the tab title with the status, e.g. "① Waiting · My session — DeepSeek Harness". The title text is the only place an exact number can be read, so it works with the icon rather than instead of it.',
-  'alert.setting.sound': 'Sound',
-  'alert.setting.soundHint':
-    "Master switch. Note the browser's autoplay policy: no chime can sound until you have clicked this interface once. That is the browser's rule, not the plugin's.",
-  'alert.setting.soundWaiting': 'Chime when a question waits',
-  'alert.setting.soundWaitingHint':
-    'A rising two-note chime when the model asks something — the one sound that means "decide now".',
-  'alert.setting.soundApproval': 'Chime when an approval waits',
-  'alert.setting.soundApprovalHint': 'A single note when the model requests a permission escalation.',
-  'alert.setting.soundDone': 'Chime when a session finishes',
-  'alert.setting.soundDoneHint':
-    'A soft low note when a turn finishes. It is ambient information, so if it starts to feel like noise, this is the first switch to turn off.',
-  'alert.setting.soundBlocked': 'Only when this page is in the background',
-  'alert.setting.soundBlockedHint':
-    'On by default. While you are looking at this interface the icon and the title have already said it, and a chime on top of that is an interruption. Turn this off to be chimed at regardless.',
-  'alert.setting.volume': 'Volume',
-  'alert.setting.volumeHint': 'Chime volume, 0 to 1.',
-  'alert.setting.doneWindow': 'Completed signal window',
-  'alert.setting.doneWindowHint':
-    'How long a finished session keeps the green signal, in milliseconds. 60000 (one minute) by default; raise it if "just finished" is easy to miss.',
-  'alert.setting.preview': 'Preview',
-  'alert.setting.previewHint': 'Plays the chime once, which also unlocks audio for this tab.',
-  'alert.on': 'On',
-  'alert.off': 'Off',
+  'alert.primitive.motion.turn': 'the fish turns; speed is seconds per revolution',
+  'alert.primitive.motion.blink': 'the whole icon dims and returns; speed is seconds per breath',
+  'alert.primitive.motion.pulse': 'the background colour alternates; speed is seconds per cycle',
+  'alert.preview': 'State previews',
+  'alert.preview.hint':
+    '32 pixels, the size the tab draws; the motion runs as the document describes it. Press "Preview" to put that state in the tab itself — icon and title — and press it again, or leave this page, to go back to the live state.',
+  'alert.preview.audition': 'Play',
+  'alert.preview.silent': 'silent',
+  'alert.preview.gain': 'volume',
+  'alert.preview.fallback': '(default)',
+  'alert.preview.pin': 'In tab',
+  'alert.preview.pinHint': 'Show this state in the browser tab, so an edit can be judged in the tab strip itself',
+  'alert.preview.pinned': 'Showing',
+  'alert.preview.pinnedHint': 'The tab is showing this state; press again to go back to the live one',
+  'alert.problems': 'These lines do nothing yet:',
+  'alert.problemsMore': 'more not listed',
   'alert.reset': 'Reset to defaults',
   'alert.status.waiting': 'Waiting',
   'alert.status.approval': 'Waiting for approval',
@@ -1313,35 +1368,54 @@ const ROW_CSS = [
   '.dsh-sentry-head{flex-direction:column;gap:4px;display:flex}',
   '.dsh-sentry-title{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:400;line-height:22px}',
   '.dsh-sentry-desc{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400;line-height:18px}',
-  '.dsh-sentry-list{flex-direction:column;gap:16px;display:flex}',
   '.dsh-sentry-item{align-items:flex-start;justify-content:space-between;gap:16px;display:flex}',
   '.dsh-sentry-itemText{flex-direction:column;gap:4px;min-width:0;display:flex}',
   '.dsh-sentry-itemLabel{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}',
   '.dsh-sentry-itemHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
-  '.dsh-sentry-switchRow{align-items:center;gap:8px;flex:none;display:flex}',
-  '.dsh-sentry-state{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
-  '.dsh-sentry-switch{position:relative;box-sizing:border-box;width:36px;height:20px;padding:0;cursor:pointer;border:.5px solid var(--dsw-alias-border-l4);border-radius:10px;background:var(--dsw-alias-bg-module-platform);transition:background .15s ease,border-color .15s ease}',
-  '.dsh-sentry-switch[aria-checked="true"]{background:var(--dsw-alias-state-business-primary);border-color:transparent}',
-  '.dsh-sentry-knob{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-primary-foreground);transition:left .15s ease}',
-  '.dsh-sentry-switch[aria-checked="true"] .dsh-sentry-knob{left:19px}',
-  '.dsh-sentry-number{align-items:center;gap:8px;flex:none;display:flex}',
-  '.dsh-sentry-range{width:132px;accent-color:var(--dsw-alias-state-business-primary)}',
-  '.dsh-sentry-readout{min-width:44px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;text-align:right;font-variant-numeric:tabular-nums}',
   '.dsh-sentry-reset{align-self:flex-start;border:.5px solid var(--dsw-alias-border-l4);background:0 0;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:10px;padding:5px 12px;font-family:inherit;font-size:12px;line-height:18px}',
   '.dsh-sentry-reset:hover{background:var(--dsw-alias-interactive-bg-hover)}',
-  '.dsh-sentry-preview{align-items:center;gap:6px;border:.5px solid var(--dsw-alias-border-l4);background:0 0;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:10px;padding:5px 12px;font-family:inherit;font-size:12px;line-height:18px;display:inline-flex}',
-  '.dsh-sentry-preview:hover{background:var(--dsw-alias-interactive-bg-hover)}',
   '.dsh-sentry-style{flex-direction:column;gap:8px;display:flex}',
   '.dsh-sentry-editor{display:block}',
   // The editor's own stylesheet is injected by the library; these bind its appearance to the
   // interface's design tokens, so the box matches every other field and follows the theme
   // switch rather than the operating system's colour scheme.
   '.dsh-sentry-editor .litearea-box{border-width:.5px}',
+  // Scopes the library's palette has no entry for. They are the ones this language added
+  // when it stopped writing values positionally: a mode word (`on`, `background`), a note,
+  // and a brace. Bound to the library's own variables rather than to fixed colours, so the
+  // box follows the interface's theme the way every other token in it does.
+  '.dsh-sentry-editor .litearea-scope-value-mode{color:var(--litearea-scope-value-shape)}',
+  '.dsh-sentry-editor .litearea-scope-value-note{color:var(--litearea-scope-value-number)}',
+  '.dsh-sentry-editor .litearea-scope-punctuation{color:var(--litearea-fg-dim)}',
   '.dsh-sentry-help{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
   '.dsh-sentry-help>summary{cursor:pointer;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary));font-size:12px;line-height:18px}',
   '.dsh-sentry-helpSection{margin-top:8px}',
   '.dsh-sentry-helpTitle{color:var(--dsw-alias-label-primary);font-weight:500}',
   '.dsh-sentry-helpLine{font-family:var(--ds-font-family-code,ui-monospace,monospace);white-space:pre-wrap}',
+  // The problems the reader found, listed under the editor. The editor underlines the same
+  // spans as you type; this is the version that survives a document pasted into
+  // `settings.yaml` and read on a screen the editor was never opened on.
+  '.dsh-sentry-problems{flex-direction:column;gap:2px;display:flex}',
+  '.dsh-sentry-problemHead{color:var(--dsw-alias-state-warn-primary);font-size:11px;line-height:16px}',
+  '.dsh-sentry-problem{display:flex;gap:6px;color:var(--dsw-alias-state-warn-primary);font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:11px;line-height:16px}',
+  '.dsh-sentry-problemLine{flex:none;min-width:16px;color:var(--dsw-alias-label-tertiary);text-align:right;font-variant-numeric:tabular-nums}',
+  // The previews: the state as the tab would draw it, at the size the tab draws it.
+  '.dsh-sentry-previews{flex-direction:column;gap:8px;display:flex}',
+  '.dsh-sentry-previewsHead{flex-direction:column;gap:2px;display:flex}',
+  '.dsh-sentry-previewsTitle{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:20px}',
+  '.dsh-sentry-previewsHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
+  '.dsh-sentry-previewGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:8px}',
+  '.dsh-sentry-preview{align-items:center;flex-direction:column;gap:6px;border:.5px solid var(--dsw-alias-border-l4);border-radius:10px;background:var(--dsw-alias-bg-module-platform);padding:10px 8px;display:flex}',
+  // The card whose state the tab is currently showing. It has to be obvious: a tab
+  // wearing a state nobody asked for any more is the one thing this plugin must not do.
+  '.dsh-sentry-preview[data-pinned="true"]{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover)}',
+  '.dsh-sentry-previewIcon{width:32px;height:32px;display:block}',
+  '.dsh-sentry-previewName{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px;text-align:center}',
+  '.dsh-sentry-previewSound{color:var(--dsw-alias-label-tertiary);font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:10px;line-height:14px;text-align:center}',
+  '.dsh-sentry-previewActions{align-items:center;gap:6px;flex-wrap:wrap;justify-content:center;display:flex}',
+  '.dsh-sentry-audition,.dsh-sentry-pin{border:.5px solid var(--dsw-alias-border-l4);background:0 0;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:8px;padding:3px 10px;font-family:inherit;font-size:11px;line-height:16px}',
+  '.dsh-sentry-audition:hover,.dsh-sentry-pin:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+  '.dsh-sentry-pin[aria-pressed="true"]{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}',
 ].join('')
 
 /** Install the row chrome stylesheet for the plugin's lifetime. */
@@ -1374,97 +1448,6 @@ function createRowStore() {
       },
     },
   })
-}
-
-/**
- * One boolean setting's row: what it does, whether it is on, and the switch.
- *
- * A `role="switch"` button rather than a checkbox input, so the whole control is
- * one hit target that matches the design system's own toggles instead of the
- * platform's.
- * @param props - React props.
- * @returns the item element.
- */
-function SettingSwitch({ label, hint, state, checked, onToggle }) {
-  return React.createElement(
-    'div',
-    { className: 'dsh-sentry-item' },
-    React.createElement(
-      'div',
-      { className: 'dsh-sentry-itemText' },
-      React.createElement('div', { className: 'dsh-sentry-itemLabel' }, label),
-      React.createElement('div', { className: 'dsh-sentry-itemHint' }, hint),
-    ),
-    React.createElement(
-      'div',
-      { className: 'dsh-sentry-switchRow' },
-      React.createElement('span', { className: 'dsh-sentry-state' }, state),
-      React.createElement(
-        'button',
-        {
-          type: 'button',
-          role: 'switch',
-          className: 'dsh-sentry-switch',
-          'aria-checked': checked === true,
-          'aria-label': label,
-          onClick: () => {
-            onToggle(checked !== true)
-          },
-        },
-        React.createElement('span', { className: 'dsh-sentry-knob' }),
-      ),
-    ),
-  )
-}
-
-/**
- * One numeric setting's row: a range control plus a readout.
- *
- * A range rather than a text field because every number here is a perceptual
- * quantity — how big the fish is, how loud the chime is — and the right value is
- * found by dragging until it looks right.
- * @param props - React props.
- * @returns the item element.
- */
-function SettingNumber({ label, hint, value, min, max, step, format, onChange }) {
-  return React.createElement(
-    'div',
-    { className: 'dsh-sentry-item' },
-    React.createElement(
-      'div',
-      { className: 'dsh-sentry-itemText' },
-      React.createElement('div', { className: 'dsh-sentry-itemLabel' }, label),
-      React.createElement('div', { className: 'dsh-sentry-itemHint' }, hint),
-    ),
-    React.createElement(
-      'div',
-      { className: 'dsh-sentry-number' },
-      React.createElement('input', {
-        type: 'range',
-        className: 'dsh-sentry-range',
-        min,
-        max,
-        step,
-        value,
-        'aria-label': label,
-        onChange: (event) => {
-          onChange(Number.parseFloat(event.target.value))
-        },
-      }),
-      React.createElement('span', { className: 'dsh-sentry-readout' }, format(value)),
-    ),
-  )
-}
-
-/** Range bounds and readout formatting, per numeric setting. */
-const NUMBER_UI = {
-  volume: { min: 0, max: 1, step: 0.05, format: (value) => `${Math.round(value * 100)}%` },
-  doneWindowMs: {
-    min: 0,
-    max: 300_000,
-    step: 5000,
-    format: (value) => `${Math.round(value / 1000)}s`,
-  },
 }
 
 /**
@@ -1502,13 +1485,27 @@ const EDITOR_VARIABLES = {
 }
 
 /**
- * The style document, the reference needed to write one, and the editor over it.
+ * How many of the reader's problems the row lists before it counts the rest.
  *
- * A `<details>` block rather than a form, and now a real editor rather than a text area.
- * The point of the DSL is that the appearance is four combinations of four primitives;
- * expressing that as controls would take a dozen of them and still not say what one line
- * says. So the help text is not decoration — it *is* the interface, and it lists the closed
- * vocabulary the parser accepts.
+ * A pasted document can be wrong on every line, and the list exists to point at the
+ * mistakes worth fixing rather than to reproduce the document. The editor underlines
+ * all of them either way.
+ */
+const PROBLEM_ROWS = 6
+
+/**
+ * The style document, the reference needed to write one, the problems found in it,
+ * and the editor over it.
+ *
+ * A `<details>` block rather than a form, and a real editor rather than a text area. The
+ * point of the document is that the appearance and the sound of four states are
+ * written the same way and read in one place; expressing that as controls would take
+ * a dozen of them and still not say what one block says. So the help text is not
+ * decoration — it *is* the interface, and it lists the vocabulary the reader accepts.
+ *
+ * The problems are printed as well as underlined: the editor's squiggles are the
+ * version that helps while typing, and this list is the version that survives a
+ * document pasted into `settings.yaml` and looked at without opening the editor.
  *
  * The textarea this replaces was controlled: every keystroke round-tripped through the
  * store and the value was written back, which is what destroyed the browser's undo stack
@@ -1517,33 +1514,46 @@ const EDITOR_VARIABLES = {
  * @param props - React props.
  * @returns the item element.
  */
-function SettingText({ label, hint, value, help, onChange }) {
+function SettingText({ label, hint, value, help, problems = [], onChange }) {
   const hostRef = React.useRef(null)
   const editorRef = React.useRef(undefined)
   // The newest props, so the editor's own callbacks are never a render behind.
   const latest = React.useRef({ onChange })
   latest.current = { onChange }
+  // A pasted document can be wrong on every line, and a hundred rows of complaint
+  // would push the rest of the settings page off the screen. The first few name the
+  // mistakes worth fixing; the count says how many are behind them.
+  const listed = problems.slice(0, PROBLEM_ROWS)
+  const rest = problems.length - listed.length
 
   React.useEffect(() => {
     const host = hostRef.current
     if (host === null || host === undefined) return undefined
     const editor = createEditor(host, {
-      // The vocabularies come from this plugin's own constants, so the editor cannot offer a
-      // shape or a motion the parser would then reject.
+      // The vocabularies come from this plugin's own constants, so the editor cannot
+      // offer a shape, a motion, or a property the reader would then reject. The
+      // document's own options object is handed over whole for the same reason: one
+      // table that both halves read is one table that cannot disagree with itself.
       grammar: dshSentryStyleGrammar({
         states: STYLE_STATES,
+        keys: STYLE_DOCUMENT_OPTIONS.keys,
+        spec: STYLE_SPEC,
         shapes: SHAPES,
-        motions: MOTIONS_LIST,
+        motions: MOTIONS,
         colors: PRESET_COLORS,
-        patterns: PATTERNS,
-        options: STYLE_OPTIONS,
+        modes: MODES,
+        notes: STYLE_NOTE_SUGGESTIONS,
         defaults: DEFAULT_LOOK,
       }),
       value: latest.current.value,
       ariaLabel: label,
-      // The state list is four lines and the reference below explains them; growing to a
-      // dozen and then scrolling keeps the row from pushing the rest of the settings away.
-      sizing: { minRows: 5, maxRows: 12 },
+      // The box grows with the document rather than scrolling inside it. The cap this
+      // replaces — two dozen rows — was smaller than the shipped document, so the
+      // editor grew a scrollbar of its own inside a page that already scrolls: two
+      // scrollbars for one document, and the one the user is trying to reach is the
+      // page's. The bound that is left is a sanity limit for a pasted document
+      // hundreds of lines long, not a display decision.
+      sizing: { minRows: 12, maxRows: 200 },
       variables: EDITOR_VARIABLES,
       // A space does not open the list. It separates the tokens of this document,
       // which is the argument for opening one there and the reason it is off: the
@@ -1584,6 +1594,32 @@ function SettingText({ label, hint, value, help, onChange }) {
       React.createElement('div', { className: 'dsh-sentry-itemHint' }, hint),
     ),
     React.createElement('div', { className: 'dsh-sentry-editor', ref: hostRef }),
+    problems.length === 0
+      ? null
+      : React.createElement(
+          'div',
+          { className: 'dsh-sentry-problems' },
+          React.createElement('div', { className: 'dsh-sentry-problemHead' }, help.problems),
+          ...listed.map((problem, index) =>
+            React.createElement(
+              'div',
+              { className: 'dsh-sentry-problem', key: `p${String(index)}` },
+              React.createElement(
+                'span',
+                { className: 'dsh-sentry-problemLine' },
+                String(problem.line + 1),
+              ),
+              React.createElement('span', null, problem.message),
+            ),
+          ),
+          rest === 0
+            ? null
+            : React.createElement(
+                'div',
+                { className: 'dsh-sentry-problemHead' },
+                `…${String(rest)} ${help.problemsMore}`,
+              ),
+        ),
     React.createElement(
       'details',
       { className: 'dsh-sentry-help' },
@@ -1605,53 +1641,255 @@ function SettingText({ label, hint, value, help, onChange }) {
 /**
  * The style reference, rendered into the row from the vocabularies themselves.
  *
- * Built from `SHAPES`, `MOTIONS_LIST`, `PRESET_COLORS`, and `DEFAULT_LOOK` rather
- * than written out by hand, so the help cannot drift from what the parser accepts
- * — the failure mode a hand-written reference always has.
+ * Built from `SHAPES`, `MOTIONS`, `PRESET_COLORS`, and the key lists rather than
+ * written out by hand, so the reference cannot drift from what the reader accepts —
+ * the failure mode a hand-written reference always has. What is written by hand is
+ * the prose, which is the part a translator has to see.
  *
  * @param t - the translator.
- * @returns `{ summary, sections }`.
+ * @returns `{ summary, problems, sections }`.
  */
 function styleHelp(t) {
   /** @param name - a primitive name. @returns its documented line. */
   const describe = (name) => t(`alert.primitive.${name}`)
   return {
     summary: t('alert.style.help'),
+    problems: t('alert.problems'),
+    problemsMore: t('alert.problemsMore'),
     sections: [
       {
-        title: t('alert.style.syntax'),
-        lines: [t('alert.style.syntaxLine1'), t('alert.style.syntaxLine2'), t('alert.style.syntaxLine3')],
+        title: t('alert.style.document'),
+        lines: [
+          t('alert.style.documentLine1'),
+          t('alert.style.documentLine2'),
+          t('alert.style.documentLine3'),
+        ],
+      },
+      {
+        title: `${t('alert.style.globals')}: ${STYLE_GLOBAL_KEYS.join(' | ')}`,
+        lines: [t('alert.style.globalsLine')],
+      },
+      {
+        title: `${t('alert.style.state')}: ${STYLE_STATE_KEYS.join(' | ')}`,
+        lines: [t('alert.style.stateLine')],
       },
       {
         title: `${t('alert.style.shapes')}: ${SHAPES.join(' | ')}`,
         lines: SHAPES.map((name) => `${name} — ${describe(`shape.${name}`)}`),
       },
       {
-        title: `${t('alert.style.motions')}: ${MOTIONS_LIST.join(' | ')}`,
-        lines: MOTIONS_LIST.map((name) => `${name} — ${describe(`motion.${name}`)}`),
+        title: `${t('alert.style.motions')}: ${MOTIONS.join(' | ')}`,
+        lines: MOTIONS.map((name) => `${name} — ${describe(`motion.${name}`)}`),
       },
       {
         title: `${t('alert.style.colors')}: ${Object.keys(PRESET_COLORS).join(' | ')}`,
         lines: [t('alert.style.colorsLine')],
       },
-      {
-        title: t('alert.style.defaults'),
-        lines: STYLE_STATES.map((state) => {
-          const look = DEFAULT_LOOK[state]
-          return `${state.padEnd(9)} ${look.shape} ${look.color} ${look.pattern}${look.pattern === 'spokes' ? ` marks=${String(look.marks)} tip=${look.tip}` : ''} ${look.motion} speed=${String(look.speed)}`
-        }),
-      },
+      { title: t('alert.style.chime'), lines: [t('alert.style.chimeLine')] },
     ],
   }
 }
 
 /**
- * The General-settings row: one control per setting, a preview, and a reset.
+ * A one-session plan for the settings row's preview of one state.
+ *
+ * The row draws the icon through the same builder the tab does, so this is the only
+ * thing standing between the preview and a lie: a plan whose dominant state is the
+ * one being previewed, with its count set so the waiting badge is part of the
+ * picture the user is judging.
+ *
+ * @param state - the state to show.
+ * @returns a plan holding that state, and only that state.
+ */
+function previewPlan(state) {
+  const counts = { waiting: 0, approval: 0, running: 0, done: 0 }
+  counts[state] = 1
+  return {
+    bySession: new Map([['preview', { state, fresh: state === 'done' }]]),
+    active: ['preview'],
+    finished: state === 'done' ? ['preview'] : [],
+    ...counts,
+  }
+}
+
+/**
+ * A repaint counter for the previews, or a constant zero when nothing moves.
+ *
+ * One timer for the whole strip rather than one per card, and none at all when every
+ * state is still: a settings page is not the place to hold four intervals open for a
+ * document that says `motion still`.
+ *
+ * @param animate - whether anything in the document moves.
+ * @returns the current tick.
+ */
+function useTick(animate) {
+  const [tick, setTick] = React.useState(0)
+  React.useEffect(() => {
+    if (!animate) return undefined
+    const timer = setInterval(() => {
+      setTick((value) => value + 1)
+    }, TICK_MS)
+    return () => {
+      clearInterval(timer)
+    }
+  }, [animate])
+  return tick
+}
+
+/**
+ * The four states as the tab would draw them, with the sound each one makes.
+ *
+ * This is the answer to "I cannot see what I just configured", in two sizes. The card
+ * itself is the icon built by the same function the favicon uses, at the same 32
+ * pixels, driven by the same motion function. The **preview** button is the other
+ * half, and the one a 32-pixel card cannot replace: it makes the *real tab* show that
+ * state — through the same render pass, so what the tab does with it is what the card
+ * shows — which is the only way to judge the change to a state that no session
+ * happens to be in at the moment. The chime buttons are also the gesture that unlocks
+ * audio for the session, which is why there is no separate "unlock audio" control.
+ *
+ * The preview is released the moment it would become a lie: the page stops being
+ * visible, the settings page goes away, or the same card is clicked again. A tab that
+ * kept wearing a state nobody is looking at would be the one thing this plugin must
+ * never be.
+ *
+ * @param props - React props.
+ * @returns the strip element.
+ */
+function StatePreviews({ t, doc, audition, preview }) {
+  const animate = STYLE_STATES.some((state) => doc.look[state].motion !== 'still')
+  const tick = useTick(animate)
+  const [pinned, setPinned] = React.useState(undefined)
+  // The newest action, so a release triggered from an event or an unmount is never a
+  // render behind — those are exactly the calls that happen outside a render.
+  const latest = React.useRef({ preview })
+  latest.current = { preview }
+
+  // Leaving the settings page ends the preview. React runs this on unmount, which is
+  // when the slot's component goes away.
+  React.useEffect(() => () => latest.current.preview(undefined), [])
+
+  // And so does the page going out of sight. This is the important one: a preview
+  // exists to be looked at, and once the user is on another tab the icon is the only
+  // thing this plugin has to tell them the truth with.
+  React.useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden !== true) return
+      setPinned(undefined)
+      latest.current.preview(undefined)
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
+
+  /**
+   * Show this state in the tab, or stop showing it.
+   * @param state - the state whose card was clicked.
+   * @returns {void}
+   */
+  const toggle = (state) => {
+    const next = pinned === state ? undefined : state
+    setPinned(next)
+    latest.current.preview(next)
+  }
+
+  return React.createElement(
+    'div',
+    { className: 'dsh-sentry-previews' },
+    React.createElement(
+      'div',
+      { className: 'dsh-sentry-previewsHead' },
+      React.createElement('div', { className: 'dsh-sentry-previewsTitle' }, t('alert.preview')),
+      React.createElement('div', { className: 'dsh-sentry-previewsHint' }, t('alert.preview.hint')),
+    ),
+    React.createElement(
+      'div',
+      { className: 'dsh-sentry-previewGrid' },
+      ...STYLE_STATES.map((state) => {
+        const look = doc.look[state]
+        const svg = sentryFavicon(previewPlan(state), {
+          reducedMotion: false,
+          style: doc.look,
+          motion: motionTick(look, tick),
+        })
+        const channel = doc.sound.channels[state]
+        // The percentage is a line of the document — the state's own `volume`, or the
+        // document's — or the shipped one with a word saying that nothing said. What it
+        // is never is a product of two settings: a card that showed one printed a figure
+        // its reader could not find anywhere.
+        const sound =
+          channel === undefined
+            ? t('alert.preview.silent')
+            : `${channel.labels.join(' → ')} · ${t('alert.preview.gain')} ${String(Math.round(channel.gain * 100))}%${channel.unstated ? ` ${t('alert.preview.fallback')}` : ''}`
+        const shown = pinned === state
+        return React.createElement(
+          'div',
+          { className: 'dsh-sentry-preview', key: state, 'data-pinned': shown },
+          React.createElement('img', {
+            className: 'dsh-sentry-previewIcon',
+            src: svg === undefined ? undefined : faviconHref(svg),
+            alt: t(`alert.status.${state}`),
+            width: 32,
+            height: 32,
+          }),
+          React.createElement('div', { className: 'dsh-sentry-previewName' }, t(`alert.status.${state}`)),
+          React.createElement('div', { className: 'dsh-sentry-previewSound' }, sound),
+          React.createElement(
+            'div',
+            { className: 'dsh-sentry-previewActions' },
+            channel === undefined
+              ? null
+              : React.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-sentry-audition',
+                    onClick: () => {
+                      audition(channel.frequencies, channel.gain)
+                    },
+                  },
+                  t('alert.preview.audition'),
+                ),
+            React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-sentry-pin',
+                'aria-pressed': shown,
+                title: shown ? t('alert.preview.pinnedHint') : t('alert.preview.pinHint'),
+                onClick: () => {
+                  toggle(state)
+                },
+              },
+              shown ? t('alert.preview.pinned') : t('alert.preview.pin'),
+            ),
+          ),
+        )
+      }),
+    ),
+  )
+}
+
+/**
+ * The General-settings row: the document, every state as it will look and sound, and
+ * a reset.
+ *
+ * No switches, and that is the shape of the change this row went through: every knob
+ * the row used to carry is a line of the document now — `icon on`, `sound
+ * background`, `keep-done 60s`, `chime off` — so there is one place to look for how
+ * the plugin behaves and the previews sit directly under it.
+ *
  * @param props - composed slot props (`t`, `useStore`, and the inject actions).
  * @returns the row element tree.
  */
-function AlertRow({ t, useStore, setField, reset, preview }) {
+function AlertRow({ t, useStore, setField, reset, audition, preview }) {
   const state = useStore((snapshot) => snapshot)
+  const style = state.style ?? DEFAULT_STYLE
+  // Read on every render rather than cached on the settings change: it is a walk over
+  // a few dozen lines, and it means the previews below can never show a document other
+  // than the one in the editor.
+  const doc = resolveStyle(style)
+  const field = SETTINGS[0]
   return React.createElement(
     'div',
     { className: 'dsh-sentry-row' },
@@ -1661,69 +1899,17 @@ function AlertRow({ t, useStore, setField, reset, preview }) {
       React.createElement('div', { className: 'dsh-sentry-title' }, t('alert.title')),
       React.createElement('div', { className: 'dsh-sentry-desc' }, t('alert.description')),
     ),
-    React.createElement(
-      'div',
-      { className: 'dsh-sentry-list' },
-      ...SETTINGS.map((field) => {
-        const label = t(field.labelKey)
-        const hint = t(field.hintKey)
-        if (field.kind === 'boolean') {
-          const checked = state[field.id] === true
-          return React.createElement(SettingSwitch, {
-            key: field.id,
-            label,
-            hint,
-            state: checked ? t('alert.on') : t('alert.off'),
-            checked,
-            onToggle: (value) => {
-              setField(field.id, value)
-            },
-          })
-        }
-        if (field.kind === 'text') {
-          return React.createElement(SettingText, {
-            key: field.id,
-            label,
-            hint,
-            value: state[field.id] ?? field.default,
-            help: styleHelp(t),
-            onChange: (value) => {
-              setField(field.id, value)
-            },
-          })
-        }
-        const ui = NUMBER_UI[field.id]
-        return React.createElement(SettingNumber, {
-          key: field.id,
-          label,
-          hint,
-          value: state[field.id],
-          min: ui.min,
-          max: ui.max,
-          step: ui.step,
-          format: ui.format,
-          onChange: (value) => {
-            setField(field.id, value)
-          },
-        })
-      }),
-    ),
-    React.createElement(
-      'div',
-      { className: 'dsh-sentry-switchRow' },
-      React.createElement(
-        'button',
-        {
-          type: 'button',
-          className: 'dsh-sentry-preview',
-          title: t('alert.setting.previewHint'),
-          onClick: () => {
-            preview()
-          },
-        },
-        t('alert.setting.preview'),
-      ),
-    ),
+    React.createElement(SettingText, {
+      label: t(field.labelKey),
+      hint: t(field.hintKey),
+      value: style,
+      help: styleHelp(t),
+      problems: doc.problems,
+      onChange: (value) => {
+        setField(field.id, value)
+      },
+    }),
+    React.createElement(StatePreviews, { t, doc, audition, preview }),
     React.createElement(
       'button',
       {
@@ -1775,19 +1961,73 @@ export function apply(ctx) {
   const chime = createChime({
     AudioContextClass:
       typeof window === 'undefined' ? undefined : window.AudioContext ?? window.webkitAudioContext,
-    volume: SETTING_DEFAULTS.volume,
   })
   const stampStore = createStampStore(safeStorage())
 
-  /** The single element this plugin owns; the app keeps its own favicon link. */
-  const icon = document.createElement('link')
+  /**
+   * The icon element the tab is drawn from, and the only element this plugin owns.
+   *
+   * It is **replaced**, not mutated, whenever the picture changes. A browser's tab strip
+   * follows the document's set of icon links: a link whose `href` changed in place is not
+   * reliably a change, which is exactly how a configuration edit came to leave the tab
+   * showing the previous icon until something else moved the plan. Mounting a fresh
+   * element and taking the old one out in the same step is what the tab strip does react
+   * to, and it is also the only way an animated motion can be visible at all — every tick
+   * is a different picture, so every tick is a different link.
+   *
+   * The app's own link is never touched: this element is ours from creation to removal.
+   */
+  let icon = document.createElement('link')
   icon.rel = 'icon'
   icon.type = 'image/svg+xml'
   icon.setAttribute(ICON_ATTRIBUTE, '')
+  /** The `href` the mounted element carries, so a redraw that changes nothing is free. */
+  let iconHref
+
+  /**
+   * Give the tab a new icon, or take ours away.
+   *
+   * The old element goes before the new one arrives, so the head never holds two icons
+   * of ours — with two, which one the tab shows would depend on mount order.
+   * @param svg - the SVG source, or undefined when there is nothing to say.
+   * @returns {void}
+   */
+  const setIcon = (svg) => {
+    const mounted = icon.parentNode !== null && icon.parentNode !== undefined
+    if (svg === undefined) {
+      if (mounted) icon.remove()
+      iconHref = undefined
+      return
+    }
+    const href = faviconHref(svg)
+    if (mounted && iconHref === href) return
+    const next = document.createElement('link')
+    next.rel = 'icon'
+    next.type = 'image/svg+xml'
+    next.setAttribute(ICON_ATTRIBUTE, '')
+    next.href = href
+    if (mounted) icon.remove()
+    document.head.appendChild(next)
+    icon = next
+    iconHref = href
+  }
 
   const state = {
     settings: { ...SETTING_DEFAULTS },
+    // The document, resolved. Rebuilt on every render from `settings.style`, so the
+    // three channels below read one object instead of three parses of one text.
+    doc: resolveStyle(SETTING_DEFAULTS.style),
     plan: EMPTY_PLAN,
+    // The plan the two visual channels are drawn from: the live one, or the single
+    // state the settings row asked to see. Kept apart from `plan` because the alert
+    // diff below must always be a diff of live state — a preview is a picture, never
+    // an event.
+    shown: EMPTY_PLAN,
+    preview: undefined,
+    // Set once the framework tears the plugin down, so a late render — the settings row
+    // releasing a preview as it unmounts, or a subscription that fires while the
+    // disposers run — cannot mount an icon nobody owns any more.
+    disposed: false,
     running: {},
     stamps: {},
     writing: false,
@@ -1813,14 +2053,18 @@ export function apply(ctx) {
    * makes the strip safe: it marks a title the plugin has already stripped, so an
    * app title that happens to contain a ` · ` cannot be eaten one segment per
    * render.
+   *
+   * @param plan - the plan the tab is showing, which is the live one unless the
+   *   settings row asked to preview a single state.
    */
-  const desiredTitle = () => {
+  const desiredTitle = (plan) => {
     const raw = document.title
+    const off = state.doc.globals.title === false
     // Everything this plugin wrote sits behind the marker, so the app's own title
     // underneath comes off by removing the marker and the prefix — no guessing: a
     // title the app rewrites arrives without the marker and is used as-is.
     if (!raw.endsWith(TITLE_MARK)) {
-      const plain = state.settings.title === false ? raw : titleWithStatus(raw, state.plan, t)
+      const plain = off ? raw : titleWithStatus(raw, plan, t)
       return plain === raw ? raw : `${plain}${TITLE_MARK}`
     }
 
@@ -1829,7 +2073,7 @@ export function apply(ctx) {
     // which reads as a switch that does not work.
     const bare = raw.slice(0, -TITLE_MARK.length)
     const current = bare.replace(TITLE_PREFIX, '')
-    const next = state.settings.title === false ? current : titleWithStatus(current, state.plan, t)
+    const next = off ? current : titleWithStatus(current, plan, t)
     // Nothing left to say: return the plain app title, dropping the marker with
     // the prefix. This is the branch that takes the status off when the last
     // session goes quiet or the channel is switched off — the *stripped* text, not
@@ -1837,9 +2081,12 @@ export function apply(ctx) {
     return next === current ? current : `${next}${TITLE_MARK}`
   }
 
-  /** The title: this plugin's prefix in front of whatever the app wrote. */
-  const applyTitle = () => {
-    const next = desiredTitle()
+  /**
+   * The title: this plugin's prefix in front of whatever the app wrote.
+   * @param plan - the plan the tab is showing.
+   */
+  const applyTitle = (plan) => {
+    const next = desiredTitle(plan)
     if (next === document.title) return
     state.writing = true
     document.title = next
@@ -1873,51 +2120,51 @@ export function apply(ctx) {
    * The favicon: the state's background with the fish carved through it, or the
    * app's own icon again.
    *
-   * The style document is resolved on every draw rather than cached on the
-   * settings change, because the parse is a few string splits over at most a
-   * dozen lines — cheaper than the bookkeeping a cache would need, and it means a
-   * document edited in `settings.yaml` and reloaded cannot go stale.
+   * The appearance comes from `state.doc`, which the render pass rebuilt from the
+   * settings — so a document edited in `settings.yaml` and reloaded, or typed into
+   * the row, reaches the tab through the same path and cannot go stale.
    *
    * The motion override comes from the tick, which is what makes a driven motion
-   * work: `blink` dims, `flush` pulses the colour, `turn` steps the angle, and
+   * work: `blink` dims, `pulse` alternates the colour, `turn` steps the angle, and
    * every one of them is just an argument to this same draw.
+   *
+   * @param plan - the plan the tab is showing.
    */
-  const applyIcon = () => {
-    const style = resolveStyle(state.settings.style).look
-    const chosen = activeLook(state.plan, style)
+  const applyIcon = (plan) => {
+    const doc = state.doc
+    const chosen = activeLook(plan, doc.look)
     const override = state.tick === 0 ? {} : motionTick(chosen, state.tick)
-    const svg =
-      state.settings.favicon === false
+    setIcon(
+      doc.globals.icon === false
         ? undefined
-        : sentryFavicon(state.plan, {
+        : sentryFavicon(plan, {
             reducedMotion: prefersReducedMotion(),
-            style,
+            style: doc.look,
             motion: override,
-          })
-    if (svg === undefined) {
-      icon.remove()
-      return
-    }
-    icon.href = faviconHref(svg)
-    if (icon.parentNode === null || icon.parentNode === undefined) document.head.appendChild(icon)
+          }),
+    )
   }
 
-  /** The chime, gated on visibility, focus and the settings. */
+  /** The chime, gated on visibility, focus and the document's own rules. */
   const applySound = (alerts) => {
-    const kind = soundPlan(alerts, state.settings, {
+    const chosen = soundPlan(alerts, state.doc.sound, {
       now: Date.now(),
       lastSoundAt: state.lastSoundAt,
       hidden: document.hidden === true,
       focused: !state.unfocused && document.hasFocus?.() === true,
     })
-    if (kind === undefined) return
+    if (chosen === undefined) return
     state.lastSoundAt = Date.now()
-    chime.play(kind)
+    chime.play(chosen.frequencies, chosen.gain)
   }
 
   /** Recompute everything from the current subscriptions and settings. */
   const render = () => {
+    if (state.disposed) return
     const now = Date.now()
+    // The document first: the plan's completed window and everything the three
+    // channels draw come from it, so nothing below reads a stale parse.
+    state.doc = resolveStyle(state.settings.style)
     // The completion edge is noted before the plan is built, so a session that has
     // just stopped running shows its green signal on this very pass.
     const edges = noteRunningEdges(state.running, list(), stampStore.readStamps(), now)
@@ -1925,16 +2172,23 @@ export function apply(ctx) {
     state.running = edges.running
     state.stamps = edges.stamps
 
-    const next = sessionPlan(list(), pending(), edges.stamps, {
+    const live = sessionPlan(list(), pending(), edges.stamps, {
       now,
-      doneWindowMs: state.settings.doneWindowMs,
+      doneWindowMs: state.doc.globals.keepDoneMs,
     })
-    const alerts = changeAlerts(state.plan, next)
-    state.plan = next
-    applyIcon()
-    applyTitle()
+    // The alert diff is against the LIVE plan and never against what is on screen:
+    // a preview is a picture of a state, not an event, so it must not eat a chime or
+    // make the next real arrival look like it has already been reported.
+    const alerts = changeAlerts(state.plan, live)
+    state.plan = live
+    // What the tab shows is the live plan, unless the settings row asked to see one
+    // state — which is the only way to judge a configuration change for a state that
+    // no session happens to be in right now.
+    state.shown = state.preview === undefined ? live : previewPlan(state.preview)
+    applyIcon(state.shown)
+    applyTitle(state.shown)
     applySound(alerts)
-    applyMotion()
+    applyMotion(state.shown)
   }
 
   /**
@@ -1943,15 +2197,15 @@ export function apply(ctx) {
    * The timer is owned by the state rather than by the draw, and its interval is
    * the motion's own tick. It is stopped the moment nothing is animating — which
    * matters more than it looks: a background tab's timers are throttled, but an
-   * idle tab with no sessions should not be holding one at all. The one exception
-   * is a `turn` the browser can animate itself, which sets no timer and costs
-   * nothing.
+   * idle tab with no sessions should not be holding one at all.
+   *
+   * @param plan - the plan the tab is showing.
    */
-  const applyMotion = () => {
-    const style = resolveStyle(state.settings.style).look
-    const chosen = activeLook(state.plan, style)
+  const applyMotion = (plan) => {
+    const doc = state.doc
+    const chosen = activeLook(plan, doc.look)
     const interval =
-      state.settings.favicon === false ? undefined : tickInterval(chosen, prefersReducedMotion())
+      doc.globals.icon === false ? undefined : tickInterval(chosen, prefersReducedMotion())
     const wanted = interval ?? null
     if (wanted === state.motionInterval) return
     if (state.motionTimer !== undefined) {
@@ -1962,7 +2216,9 @@ export function apply(ctx) {
     if (wanted === null) return
     state.motionTimer = setInterval(() => {
       state.tick += 1
-      applyIcon()
+      // The plan the render pass chose, so a preview keeps its own motion while the
+      // sessions underneath carry on being watched by `state.plan`.
+      applyIcon(state.shown)
     }, wanted)
   }
 
@@ -1981,6 +2237,12 @@ export function apply(ctx) {
   // Focus, blur, and visibility all change whether a sound is allowed, and coming
   // back to the foreground also has to redraw: a session that finished while the
   // user was away has already been reported by the icon they are now looking at.
+  //
+  // Visibility also ends a preview, and that rule belongs here rather than only in the
+  // row: the row can be unmounted or re-rendered out of step, but the engine is the
+  // thing that must never let the tab claim a state nobody asked for any more. There
+  // is no preview to see once the page is out of sight — the tab strip is precisely
+  // what this plugin exists to make honest.
   ctx.effect(() => {
     const onFocus = () => {
       state.unfocused = false
@@ -1989,13 +2251,17 @@ export function apply(ctx) {
     const onBlur = () => {
       state.unfocused = true
     }
+    const onVisibility = () => {
+      if (document.hidden === true) state.preview = undefined
+      render()
+    }
     window.addEventListener('focus', onFocus)
     window.addEventListener('blur', onBlur)
-    document.addEventListener('visibilitychange', render)
+    document.addEventListener('visibilitychange', onVisibility)
     return () => {
       window.removeEventListener('focus', onFocus)
       window.removeEventListener('blur', onBlur)
-      document.removeEventListener('visibilitychange', render)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, 'dsh-sentry: visibility and focus listeners')
 
@@ -2023,7 +2289,7 @@ export function apply(ctx) {
     if (target === null) return () => {}
     const observer = new MutationObserver(() => {
       if (state.writing) return
-      applyTitle()
+      applyTitle(state.shown)
     })
     observer.observe(target, { childList: true, characterData: true, subtree: true })
     return () => {
@@ -2033,6 +2299,8 @@ export function apply(ctx) {
 
   ctx.effect(
     () => () => {
+      state.disposed = true
+      state.preview = undefined
       if (state.motionTimer !== undefined) clearInterval(state.motionTimer)
       state.motionTimer = undefined
       icon.remove()
@@ -2108,11 +2376,23 @@ export function apply(ctx) {
             reset: () => {
               for (const field of SETTINGS) scope.unset(field.id)
             },
-            preview: () => {
-              // The preview doubles as the audio unlock: the click that plays it
-              // is the gesture the autoplay policy waits for.
+            // One state's chime, played on demand by the row's preview cards. The
+            // notes and the gain are whatever the row resolved out of the document,
+            // so what is heard is what the card printed beside it — and the click is
+            // the gesture the autoplay policy waits for, which is why there is no
+            // separate "unlock audio" button.
+            audition: (frequencies, gain) => {
               chime.resume()
-              chime.play('questions')
+              chime.play(frequencies, gain)
+            },
+            // Show one state in the tab itself, or with no name go back to the live
+            // plan. The row owns this: it sets it when a card is clicked and clears it
+            // when the card is clicked again, when the page stops being visible, and
+            // when the settings page goes away — a preview that outlived the screen
+            // that explains it would be the tab lying about the sessions.
+            preview: (name) => {
+              state.preview = name
+              render()
             },
           }
         },
