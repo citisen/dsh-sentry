@@ -280,8 +280,10 @@ failing check instead of a silently-green favicon.
   smudge, so four or more shows no digit — the ring still says "several", and the
   title still carries the exact number.
 - **"Just finished" needs a decay window to mean anything.** With
-  `Completed signal window` set to 0 the green signal never appears, which is a
-  legitimate configuration rather than a broken one.
+  `Completed signal window` set to 0 the green signal never appears — and, since
+  the completion chime is driven by the same edge, that chime goes quiet with it.
+  That is a legitimate configuration rather than a broken one, but it is a
+  two-channel switch wearing one name.
 - **The sound needs one click to unlock**, per the browser's autoplay policy. The
   plugin cannot and does not try to defeat that.
 - **A dsh release can turn a channel into a no-op.** If `ui-layout` stops writing
