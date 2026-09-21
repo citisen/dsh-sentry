@@ -152,7 +152,8 @@ the channel off strips the prefix instead of leaving it in the tab forever.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| Tab icon status ring | On | Draws the ring, the arcs, and the badge |
+| Tab icon styling | On | Draws the state styling on the tab icon, or restores the original |
+| Style document | see below | The appearance of the four states, as a small text document |
 | Tab title prefix | On | Composes the status into `document.title` |
 | Sound | On | Master switch for the chime |
 | Chime when a question waits | On | The rising two-note chime |
@@ -160,12 +161,82 @@ the channel off strips the prefix instead of leaving it in the tab forever.
 | Chime when a session finishes | On | The soft low note — a finished turn is ambient information, so this is the first switch to turn off if it starts to feel like noise |
 | Only when this page is in the background | On | The foreground-is-silence rule |
 | Volume | 50% | Chime volume, 0–1 |
-| Fish size | 41.6% | How much of the icon the fish takes, 30%–55% |
-| Completed signal window | 60s | How long a finished session keeps the green signal |
+| Completed signal window | 60s | How long a finished session keeps the signal |
 
 The durable half lives in `$DSH_HOME/settings.yaml` under the `alert` namespace.
 The namespace is deliberately not a `ui-*` name: dsh reserves that prefix for its
 own shipped surfaces.
+
+### The style document
+
+The icon's appearance is four states, each a **shape, a colour, a pattern, a
+motion, and a rate** — and the interesting part is the combinations. A dozen
+switches could express that; they would also take a dozen interactions to say what
+one line says. So it is one text document:
+
+```
+running  circle  blue   spokes=2 dot  turn   3
+waiting  rounded amber  none          blink  1.1
+approval rounded amber  none          blink  1.9
+done     circle  green  none          flush  1.6
+```
+
+The syntax is line-oriented: one line per state, `key value` pairs, `#` starts a
+comment, and the leading tokens may be positional in the order shape, colour,
+pattern, motion, speed. `spokes=3` is one token that sets the pattern *and* its
+count. Anything a line omits keeps that state's shipped value.
+
+| Vocabulary | Values |
+| --- | --- |
+| shape | `circle` `rounded` `square` `none` |
+| pattern | `none` `hands` `spokes` `petals` `windmill` `dots` `rays` |
+| tip (for `spokes` / `hands`) | `none` `dot` `arrow` `bar` |
+| motion | `still` `turn` `blink` `flush` |
+| colour | `blue` `amber` `green` `red` `purple` `gray` `dark` `light` |
+
+**The parser is total, deliberately.** Anything it does not understand is dropped
+and reported, and the shipped value is used instead — a typo in a settings file
+must not be able to leave a tab without an icon. Colours are preset *names* rather
+than free values for the same reason the shapes are a closed list: both failures
+this plugin has already shipped were contrast failures, and a preset cannot be
+illegible.
+
+The settings row renders its reference table from the vocabularies the parser
+actually uses, so the help cannot drift from the code.
+
+## The icon
+
+The fish is the product's own art, lifted byte-for-byte out of the shipped
+`dsh-web-frontend/dist/favicon.svg` by `scripts/fish-path.mjs` — not redrawn, not
+simplified, not a lookalike. It is drawn at **full size**, which for a 50×50
+drawing in a 32px canvas is `32/50`.
+
+It is then **carved out of the background**, not painted on it. That is the
+decision the whole icon rests on:
+
+```
+   ╭───────────────╮          the fish is negative space, so its
+   │   ▄▄▄▄▄▄▄     │          silhouette is the TAB BAR showing
+   │  ██ ●  ● ██   │          through — legible against any colour,
+   │   ▀▀▀▀▀▀▀     │          in any browser theme, with no stroke to
+   ╰───────────────╯          collide with at 16px
+```
+
+Painting it instead produced a white shape on a coloured disc whose edges smeared
+at favicon size, and a black shape on a dark disc that vanished entirely. Both
+shipped; both were reported as "a white circle".
+
+Motion is SMIL and nothing else. In the favicon replacement document a CSS
+`transform` has no reliable origin and renders as a wobble, while
+`animateTransform` with an explicit center does not. With `prefers-reduced-motion`
+set, no animation is emitted at all — the shape and the colour survive, the motion
+does not.
+
+One honest consequence: the fish is only visible where the tab bar differs from the
+background. On a tab bar that happens to match, the background reads as a plain
+shape. A page cannot know the browser's chrome colour, which is why motion and
+silhouette carry the state, and why the icon never depends on the background
+alone.
 
 ## Install
 

@@ -306,19 +306,28 @@ const OPTIONS = { reducedMotion: false }
 }
 
 {
-  // The fish is the product's own art, carved out of the disc rather than painted
-  // on it, at full size and centered by construction.
+  // The fish is the product's own art, carved out of the background rather than
+  // painted on it, at full size and centered by construction.
   const svg = plugin.sentryFavicon(planFor(['running']), OPTIONS)
   assert.ok(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">'), 'explicit dimensions are required')
 
-  // The fish is negative space: inside the mask, filled black so the disc is cut
-  // away there, and never painted anywhere else. That is what makes its silhouette
-  // legible against any disc colour and any tab-bar colour.
+  // The fish is negative space: inside the mask, filled black so the background is
+  // cut away there, and never painted anywhere else. That is what makes its
+  // silhouette legible against any colour and any tab bar.
   const mask = /<mask id="disc"[^>]*>([\s\S]*?)<\/mask>/.exec(svg)?.[1]
-  assert.ok(mask !== undefined, 'the disc must be mask-carved')
+  assert.ok(mask !== undefined, 'the background must be mask-carved')
   assert.ok(mask.includes(`<path d="${FISH}" fill="#000"`), 'the shipped fish path, verbatim, as the carving')
   assert.equal(svg.split(`<path d="${FISH}"`).length - 1, 1, 'the fish must appear exactly once — as a carving')
   assert.ok(!/#eef0f3|#23262c|prefers-color-scheme/.test(svg), 'no painted fish and no scheme pair survives')
+
+  // The mask starts from a full-canvas black rect and keeps only the background
+  // shape white, so a shape of `none` really carves everything away.
+  assert.ok(mask.startsWith('<rect x="0" y="0" width="32" height="32" fill="#000"/>'), 'the mask must start empty')
+  assert.ok(mask.includes('<circle cx="16" cy="16" r="15.2" fill="#4d6bfe"/>'), 'the shipped running shape is a blue circle')
+  assert.ok(
+    svg.includes('<rect x="0" y="0" width="32" height="32" fill="#4d6bfe" mask="url(#disc)"/>'),
+    'the painted layer is one rect in the state colour, carved by the mask',
+  )
 
   // Full size means the 50x50 art scaled by 32/50 = 0.64, which is exactly what
   // "not shrunk any more" means. The first version used 0.416 and the fish became
@@ -329,21 +338,17 @@ const OPTIONS = { reducedMotion: false }
     'centered at full size',
   )
 
-  // The disc is the canvas: one filled circle, carved by the mask, at the one
-  // radius the geometry is built around.
-  assert.ok(svg.includes(`<circle cx="16" cy="16" r="15.4"`), 'the disc fills the icon')
-
-  // The state pattern is carved too, and the running state's is the clock hands:
-  // two bars with a dot on the tip, which is what makes them read as hands rather
-  // than as slots.
-  assert.ok(mask.includes('<rect x="14.7" y="3.4"'), 'the running state carves bar hands')
-  assert.ok(mask.includes('<circle cx="16" cy="4" r="2.7" fill="#000"/>'), 'each hand has a tip')
-  assert.equal(mask.split('<rect x="14.7"').length - 1, 2, 'two bars')
+  // The shipped running state carves two spokes with a dot on each tip: the dot is
+  // what makes a bar read as a hand rather than as a slot.
+  assert.ok(mask.includes('<rect x="14.6" y="2.8"'), 'the running state carves spokes')
+  assert.ok(mask.includes('<circle cx="16" cy="4.2" r="2.6" fill="#000"/>'), 'each spoke carries its tip')
+  assert.equal(mask.split('<rect x="14.6"').length - 1, 2, 'two spokes')
+  assert.equal(mask.split('rotate(').length - 1, 2, 'placed opposite each other')
 }
 
 {
   // Each state is a composition of primitives, and the composition is the whole
-  // model: a disc colour, a carved pattern, a motion, a rate.
+  // model: a background shape and colour, a carved pattern, a motion, a rate.
   const running = plugin.sentryFavicon(planFor(['running']), OPTIONS)
   assert.ok(running.includes('<animateTransform attributeName="transform" type="rotate"'), 'running turns')
   assert.ok(running.includes('dur="3s"'), 'at its own rate')
@@ -357,23 +362,97 @@ const OPTIONS = { reducedMotion: false }
   assert.ok(approval.includes('dur="1.9s"'), 'but slowly — the rate is the only thing telling them apart')
 
   const done = plugin.sentryFavicon(planFor(['done']), OPTIONS)
-  assert.ok(done.includes('<animate attributeName="fill"'), 'a completion pulses the disc colour')
-  assert.ok(done.includes('fill="#22c55e"'), 'on a green disc')
+  assert.ok(done.includes('<animate attributeName="fill"'), 'a completion pulses the colour')
+  assert.ok(done.includes('fill="#22c55e"'), 'on a green background')
 
-  // An approval and a question share a colour on purpose: both mean "act", and the
+  // A question and an approval share a colour on purpose: both mean "act", and the
   // rate is the distinction. If they ever diverge, this catches it.
-  assert.equal(plugin.STATE_LOOK.waiting.disc, plugin.STATE_LOOK.approval.disc)
-  assert.notEqual(plugin.STATE_LOOK.waiting.speed, plugin.STATE_LOOK.approval.speed)
-  assert.equal(plugin.STATE_LOOK.running.pattern, 'hands')
-  assert.equal(plugin.STATE_LOOK.done.disc, '#22c55e')
+  assert.equal(plugin.DEFAULT_LOOK.waiting.color, plugin.DEFAULT_LOOK.approval.color)
+  assert.notEqual(plugin.DEFAULT_LOOK.waiting.speed, plugin.DEFAULT_LOOK.approval.speed)
+  assert.equal(plugin.DEFAULT_LOOK.running.pattern, 'spokes')
+  assert.equal(plugin.PRESET_COLORS[plugin.DEFAULT_LOOK.done.color], '#22c55e')
+
+  // The two shapes the user asked for: rounded exists, and `none` really means no
+  // background — only the carved fish is left, painted by the wrapper rect.
+  const rounded = plugin.sentryFavicon(planFor(['waiting']), OPTIONS)
+  assert.ok(rounded.includes('<rect x="0.8" y="0.8" width="30.4" height="30.4" rx="8"'), 'the waiting default is a rounded square')
 
   // Reduced motion keeps the shape and drops the animation, so the state survives
   // as a colour even when the motion does not.
-  for (const state of ['running', 'waiting', 'approval', 'done']) {
+  for (const state of plugin.STYLE_STATES) {
     const calm = plugin.sentryFavicon(planFor([state]), { reducedMotion: true })
     assert.ok(!calm.includes('<animate'), `${state} must not animate under reduced motion`)
-    assert.ok(calm.includes(`fill="${plugin.STATE_LOOK[state].disc}"`), `${state} keeps its disc colour`)
+    const color = plugin.PRESET_COLORS[plugin.DEFAULT_LOOK[state].color]
+    assert.ok(calm.includes(color), `${state} keeps its colour`)
   }
+}
+
+{
+  // ── the style DSL ─────────────────────────────────────────────────────────
+  //
+  // The document is the interface, so the parser's tolerance is a feature and not
+  // an accident: a typo must degrade to the shipped appearance rather than to a
+  // tab with no icon.
+  const shipped = plugin.resolveStyle(plugin.DEFAULT_STYLE)
+  assert.deepEqual(shipped.problems, [], 'the shipped document must parse cleanly')
+  for (const state of plugin.STYLE_STATES) {
+    assert.deepEqual(shipped.look[state], plugin.DEFAULT_LOOK[state], `${state} round-trips through the DSL`)
+  }
+
+  // A positional line and a key=value line describe the same thing.
+  // `rectangle` is not a shape, so it is placed — and refused — positionally, and
+  // the line's later tokens still land in their own slots.
+  const positional = plugin.resolveStyle('running rectangle blue petals still 2').look.running
+  const keyed = plugin.resolveStyle('running shape=circle color=amber pattern=dots tip=arrow motion=turn speed=4').look.running
+  assert.equal(positional.shape, plugin.DEFAULT_LOOK.running.shape, 'an unknown positional shape is refused')
+  assert.equal(positional.color, 'blue', 'a known colour is taken')
+  assert.equal(positional.pattern, 'petals', 'and a known pattern')
+  assert.equal(positional.motion, 'still', 'and a known motion')
+  assert.equal(positional.speed, 3, 'with its rate')
+  assert.deepEqual(keyed, { shape: 'circle', color: 'amber', pattern: 'dots', marks: 0, tip: 'none', motion: 'turn', speed: 4 })
+
+  // `spokes=3` is one token that sets two fields, which is how the shipped
+  // defaults are written.
+  const shorthand = plugin.resolveStyle('running circle blue spokes=3 arrow turn 4').look.running
+  assert.equal(shorthand.pattern, 'spokes')
+  assert.equal(shorthand.marks, 3)
+  assert.equal(shorthand.tip, 'arrow')
+
+  // Fields a line omits keep that state's shipped value.
+  const partial = plugin.resolveStyle('done color=purple').look.done
+  assert.equal(partial.color, 'purple')
+  assert.equal(partial.shape, plugin.DEFAULT_LOOK.done.shape, 'an omitted field keeps the default')
+  assert.equal(partial.motion, plugin.DEFAULT_LOOK.done.motion)
+
+  // Problems are reported rather than thrown, and never produce a broken icon.
+  const messy = plugin.resolveStyle('running\nnonsense blue\nwaiting circle blue nope spin 1')
+  assert.ok(messy.problems.some((problem) => problem.includes('nonsense')), 'an unknown state is reported')
+  assert.ok(messy.problems.some((problem) => problem.includes('nope')), 'an unknown pattern is reported')
+  assert.equal(messy.look.waiting.pattern, plugin.DEFAULT_LOOK.waiting.pattern, 'and falls back')
+  assert.equal(messy.look.waiting.motion, plugin.DEFAULT_LOOK.waiting.motion)
+  assert.equal(messy.look.running.color, plugin.DEFAULT_LOOK.running.color, 'a state named with no options keeps every default')
+
+  // Out-of-range numbers keep the default rather than drawing something absurd.
+  assert.equal(plugin.resolveStyle('running marks=99').look.running.marks, plugin.DEFAULT_LOOK.running.marks)
+  assert.equal(plugin.resolveStyle('running speed=0').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
+  assert.equal(plugin.resolveStyle('running speed=999').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
+
+  // A document is what drives the icon, end to end: the same state, two styles.
+  const styled = plugin.resolveStyle('running rounded purple rays still 4').look
+  const svg = plugin.sentryFavicon(planFor(['running']), { reducedMotion: false, style: styled })
+  assert.ok(svg.includes('fill="#8b5cf6"'), 'the document chooses the colour')
+  assert.ok(svg.includes('rx="8"'), 'and the shape')
+  assert.ok(svg.includes('<rect x="15.3" y="1.8"'), 'and the pattern')
+  assert.ok(!svg.includes('<animate'), 'and still means still')
+
+  // Comments and blank lines are ignored, and a colour that is not a preset is
+  // refused rather than passed through to the SVG.
+  const commented = plugin.resolveStyle('# a comment\n\nrunning circle red none still 1')
+  assert.equal(commented.look.running.color, 'red')
+  assert.equal(plugin.resolveStyle('running circle #ff0000 none still 1').look.running.color, plugin.DEFAULT_LOOK.running.color)
+
+  assert.equal(plugin.resolveStyle(undefined).problems.length, 0, 'an absent document is not a problem')
+  assert.equal(plugin.parseStyle(42).problems.length, 0, 'and neither is a corrupt one')
 }
 
 {
@@ -385,7 +464,7 @@ const OPTIONS = { reducedMotion: false }
   assert.ok(plugin.sentryFavicon(planFor(['waiting', 'waiting', 'waiting']), OPTIONS).includes('>3</text>'))
   const many = plugin.sentryFavicon(planFor(['waiting', 'waiting', 'waiting', 'waiting']), OPTIONS)
   assert.ok(!many.includes('<text'), 'four and up is a smudge, so no digit')
-  assert.ok(many.includes('<circle cx="16" cy="16" r="15.4" fill="#f59e0b"'), 'but the disc still says someone is waiting')
+  assert.ok(many.includes('fill="#f59e0b"'), 'but the background still says someone is waiting')
 
   // The badge is painted rather than carved, and wears a dark keyline so it stays
   // readable on a tab bar of any colour — it is the one mark that must not depend
@@ -413,19 +492,13 @@ const OPTIONS = { reducedMotion: false }
   assert.ok(!running.includes('<animate attributeName="opacity"'), 'and does not blink')
 
   const done = plugin.sentryFavicon(planFor(['done']), OPTIONS)
-  assert.ok(done.includes('<animate attributeName="fill"'), 'a completion pulses the disc colour')
-  assert.ok(
-    done.includes('<circle cx="16" cy="16" r="15.4" fill="#22c55e"'),
-    'and the disc is green',
-  )
+  assert.ok(done.includes('<animate attributeName="fill"'), 'a completion pulses the colour')
+  assert.ok(done.includes('fill="#22c55e"'), 'and the background is green')
 
   // A question outranks a busy tab: one icon shows one colour, and the most urgent
-  // fact is the one worth the whole disc.
+  // fact is the one worth the whole background.
   const blocked = plugin.sentryFavicon(planFor(['waiting', 'running']), OPTIONS)
-  assert.ok(
-    blocked.includes('<circle cx="16" cy="16" r="15.4" fill="#f59e0b"'),
-    'a question wins the disc',
-  )
+  assert.ok(blocked.includes('fill="#f59e0b"'), 'a question wins the colour')
   assert.ok(blocked.includes('dur="1.1s"'), 'with the question\u2019s own rate')
 
   // Reduced motion keeps the shape and drops the animation, so the state survives
@@ -434,10 +507,9 @@ const OPTIONS = { reducedMotion: false }
     const calm = plugin.sentryFavicon(planFor([state]), { reducedMotion: true })
     assert.ok(!calm.includes('<animate'), `${state} must not animate under reduced motion`)
     assert.ok(
-      calm.includes(`<circle cx="16" cy="16" r="15.4" fill="${plugin.STATE_LOOK[state].disc}"`),
-      `${state} keeps its disc colour`,
+      calm.includes(plugin.PRESET_COLORS[plugin.DEFAULT_LOOK[state].color]),
+      `${state} keeps its colour`,
     )
-    assert.ok(calm.includes('<path'), `${state} keeps the carved fish`)
   }
 }
 
@@ -707,9 +779,19 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
   for (const field of plugin.SETTINGS) {
     assert.equal(typeof field.labelKey, 'string', `${field.id} needs a label`)
     assert.equal(typeof field.hintKey, 'string', `${field.id} needs a hint`)
-    assert.ok(['boolean', 'number'].includes(field.kind), `${field.id} has an unknown kind`)
+    assert.ok(['boolean', 'number', 'text'].includes(field.kind), `${field.id} has an unknown kind`)
     assert.equal(plugin.SETTING_DEFAULTS[field.id], field.default)
   }
+
+  // The appearance document is duplicated across the two halves for the same reason
+  // the field roster is, so the copies must agree. A default changed on one side
+  // only would render one appearance in the row and read another in the engine.
+  const hostStyle = /export const DEFAULT_STYLE_DOCUMENT = \[([\s\S]*?)\]\.join\('\\n'\)/.exec(
+    readFileSync(join(root, 'lib', 'index.js'), 'utf8'),
+  )?.[1]
+  assert.ok(hostStyle !== undefined, 'the host half must declare DEFAULT_STYLE_DOCUMENT')
+  const hostStyleText = [...hostStyle.matchAll(/'([^']*)'/g)].map((match) => match[1]).join('\n')
+  assert.equal(hostStyleText, plugin.DEFAULT_STYLE, 'both halves must ship the same style document')
 
   // The defaults must agree *by value*, not merely by the presence of a literal:
   // a fresh install would otherwise render one value and enforce another. The

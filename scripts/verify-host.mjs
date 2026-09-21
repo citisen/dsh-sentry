@@ -64,6 +64,7 @@ const {
   AlertSchema,
   DONE_WINDOW_MAX,
   DONE_WINDOW_MIN,
+  DEFAULT_STYLE_DOCUMENT,
   apply,
 } = host
 
@@ -73,6 +74,7 @@ assert.equal(ALERT_NAMESPACE, 'alert', 'the namespace must not squat on the rese
 // browser-side verifier compares against.
 assert.deepEqual(ALERT_FIELDS, [
   'favicon',
+  'style',
   'title',
   'sound',
   'soundWaiting',
@@ -88,6 +90,7 @@ assert.deepEqual(ALERT_FIELDS, [
 const defaults = AlertSchema({})
 assert.deepEqual(defaults, {
   favicon: true,
+  style: DEFAULT_STYLE_DOCUMENT,
   title: true,
   sound: true,
   soundWaiting: true,
@@ -144,4 +147,5 @@ assert.ok(registered[0].schema !== undefined)
 apply({ inject: () => undefined, get: () => undefined })
 
 console.log('verify-host: OK — namespace registered, defaults and ranges verified')
+
 
