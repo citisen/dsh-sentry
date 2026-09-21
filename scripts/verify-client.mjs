@@ -342,7 +342,7 @@ const OPTIONS = { reducedMotion: false }
   // windmill, dots, rays — were all tried at 16px and all read as noise around a
   // fish nobody could then see, so the vocabulary is down to `none` and the icon
   // says its state with colour, shape, motion, and the fish itself.
-  assert.deepEqual(plugin.PATTERNS, ['none'], 'the pattern vocabulary is only `none`')
+  assert.deepEqual(plugin.PATTERNS, [], 'the pattern vocabulary is empty; the bare word none is a shape')
   assert.equal(mask.split('<rect').length - 1, 1, 'the only rect in the mask is its own black base')
   assert.equal(mask.split('<circle').length - 1, 1, 'and the only circle is the background outline')
 }
@@ -490,18 +490,56 @@ const OPTIONS = { reducedMotion: false }
     'a pattern that is no longer in the vocabulary is refused rather than drawn',
   )
   assert.equal(positional.motion, 'still', 'and a known motion')
-  assert.equal(positional.speed, 3, 'with its rate')
+  assert.equal(positional.speed, 2, 'with its rate')
   assert.deepEqual(keyed, { shape: 'square', color: 'amber', pattern: 'none', motion: 'turn', speed: 4 })
 
-  // The dial vocabulary is gone: those names must now be reported rather than
-  // silently accepted, or a document written against an older release would look
-  // like it did something.
+  // A bare `none` is a SHAPE. It is also the word the pattern slot used to take,
+  // and while the two vocabularies overlapped the parser spent the token on the
+  // pattern and left the shape at its default — so `running none` still drew a
+  // circle. That is the bug this pins.
+  assert.equal(plugin.resolveStyle('running none').look.running.shape, 'none', 'a bare `none` is a shape')
+  assert.equal(plugin.resolveStyle('running shape=none').look.running.shape, 'none', 'and so is the explicit form')
+  assert.equal(plugin.resolveStyle('running circle pattern=none').look.running.pattern, 'none', 'the pattern keeps its explicit spelling')
+  assert.deepEqual(plugin.resolveStyle('running none').problems, [], 'and none of it is reported as a problem')
+
+  // A bare number is the rate, wherever it appears. It used to be dropped into
+  // whichever slot happened to be free next, which made the documented
+  // `running none turn 3` report "3 is not a valid color".
+  const withRate = plugin.resolveStyle('running none turn 3')
+  assert.deepEqual(withRate.problems, [], 'a trailing number after a shape and a motion is a rate')
+  assert.equal(withRate.look.running.speed, 3)
+  assert.equal(withRate.look.running.shape, 'none')
+  assert.equal(plugin.resolveStyle('waiting none blink 1.1').look.waiting.speed, 1.1)
+  assert.deepEqual(plugin.resolveStyle('done none flush 1.6').problems, [])
+
+  // Later tokens win within a line, which is the only sensible reading of a
+  // document that says the same thing twice. The shipped lines therefore name the
+  // shape once and nothing else positional, so nothing can overwrite it.
+  assert.equal(plugin.resolveStyle('running rounded purple none turn 1').look.running.shape, 'none', 'the last shape named wins')
+  assert.equal(plugin.resolveStyle('running rounded purple none turn 1').look.running.color, 'purple')
+  assert.equal(plugin.resolveStyle('running circle blue turn 2').look.running.shape, 'circle')
+  assert.equal(plugin.resolveStyle('running circle blue turn 2').look.running.speed, 2)
+
+  // The pattern vocabulary is empty, so a name from it is now reported rather
+  // than silently accepted: a document written against an older release must not
+  // look like it did something.
   const stale = plugin.resolveStyle('running circle blue spokes=2 turn 3')
   assert.ok(
     stale.problems.some((problem) => problem.includes('spokes')),
     'a removed pattern is reported rather than ignored',
   )
   assert.deepEqual(stale.look.running, plugin.DEFAULT_LOOK.running, 'and the shipped look stands')
+
+  // A shape of `none` really is no background: the mask keeps nothing, so the only
+  // thing the painted layer shows is the carved fish.
+  const bare = plugin.sentryFavicon(planFor(['running']), {
+    reducedMotion: false,
+    style: plugin.resolveStyle('running none').look,
+  })
+  const mask = /<mask id="disc"[^>]*>([\s\S]*?)<\/mask>/.exec(bare)?.[1] ?? ''
+  assert.equal(mask.split('<circle').length - 1, 0, 'no background outline is kept')
+  assert.equal(mask.split('<rect').length - 1, 1, 'only the mask base is a rect')
+  assert.ok(mask.includes(`<path d="${FISH}"`), 'and the fish is still carved')
 
   // Fields a line omits keep that state's shipped value.
   const partial = plugin.resolveStyle('done color=purple').look.done
@@ -523,11 +561,17 @@ const OPTIONS = { reducedMotion: false }
   assert.equal(plugin.resolveStyle('running speed=999').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
 
   // A document is what drives the icon, end to end: the same state, two styles.
-  const styled = plugin.resolveStyle('running rounded purple none still 4').look
+  const styled = plugin.resolveStyle('running rounded purple still 4').look
   const svg = plugin.sentryFavicon(planFor(['running']), { reducedMotion: false, style: styled })
   assert.ok(svg.includes('fill="#8b5cf6"'), 'the document chooses the colour')
   assert.ok(svg.includes('rx="8"'), 'and the shape')
   assert.ok(!svg.includes('rotate('), 'and still means still')
+
+  // The same document with the shape set to `none` draws no background at all.
+  const shapeNone = plugin.resolveStyle('running none purple still 4').look
+  const bareSvg = plugin.sentryFavicon(planFor(['running']), { reducedMotion: false, style: shapeNone })
+  assert.ok(!bareSvg.includes('rx="8"') && !bareSvg.includes('<circle cx="16" cy="16" r="15.2"'), 'no background is drawn')
+  assert.ok(bareSvg.includes('mask="url(#disc)"'), 'but the fish is still carved out of the painted rect')
 
   // Out-of-range numbers keep the default rather than drawing something absurd.
   assert.equal(plugin.resolveStyle('running speed=0').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
@@ -1353,6 +1397,8 @@ delete globalThis.window
 
 console.log('verify-client: OK — envelope, fish, session model, favicon, title, chime, settings row and engine verified')
 console.log(`verify-client: factory required ${requested.join(', ')}`)
+
+
 
 
 
