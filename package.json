@@ -78,5 +78,8 @@
   ],
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "devDependencies": {
+    "@citisen/litearea": "^0.1.0"
   }
 }

@@ -19,6 +19,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { complete, inspect, scan } from '@citisen/litearea'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const bundlePath = resolve(process.argv[2] ?? join(root, 'lib', 'client.js'))
@@ -587,6 +588,181 @@ const OPTIONS = { reducedMotion: false }
   assert.equal(plugin.parseStyle(42).problems.length, 0, 'and neither is a corrupt one')
 }
 
+// ── the grammar is this repo's own code ─────────────────────────────────────
+//
+// The editor takes a grammar as a VALUE: litearea ships no syntax of its own, so the DSL's
+// grammar lives beside the DSL and is this repo's code. Which makes it this repo's to verify
+// — and a value is exactly the shape that can be verified here, in Node, without a browser:
+// hand the library's public scanner the bundle's own grammar and ask it the questions the
+// editor asks.
+//
+// The three calls below are the library's public API, imported from the devDependency the
+// build compiles in, so this is the same scanner, the same checks, and the same ranking the
+// browser runs.
+{
+  // Exactly what `src/client.js` passes — same constants, same order — so this is the shipped
+  // grammar rather than one that merely defaults to the same words.
+  const grammar = plugin.dshSentryStyleGrammar({
+    states: plugin.STYLE_STATES,
+    shapes: plugin.SHAPES,
+    motions: plugin.MOTIONS_LIST,
+    colors: plugin.PRESET_COLORS,
+    patterns: plugin.PATTERNS,
+    options: plugin.STYLE_OPTIONS,
+    defaults: plugin.DEFAULT_LOOK,
+  })
+
+  // The two layers agree about the document the plugin ships: the parser the icon is drawn
+  // from and the grammar the editor is written against. Neither has anything to say about it.
+  assert.deepEqual(plugin.parseStyle(plugin.DEFAULT_STYLE).problems, [], 'the plugin’s own parser is silent on the shipped document')
+  assert.deepEqual(inspect(plugin.DEFAULT_STYLE, grammar).diagnostics, [], 'and so is the grammar over it')
+
+  // ── the paint ─────────────────────────────────────────────────────────────
+  // A scope becomes `litearea-scope-<scope>`, so these names are what the stylesheet and the
+  // renderer colour by. The shipped document is the one every install starts with, and every
+  // word on it has to be painted.
+  const painted = scan(plugin.DEFAULT_STYLE, grammar).tokens
+  /** @param word - a word of the document. @returns the scope it was painted with. */
+  const scopeOf = (word) => painted.find((token) => token.text === word)?.scope
+  for (const [word, scope] of [
+    ['running', 'state'],
+    ['circle', 'value.shape'],
+    ['blue', 'value.color'],
+    ['turn', 'value.motion'],
+    ['3', 'value.number'],
+    ['waiting', 'state'],
+    ['amber', 'value.color'],
+    ['blink', 'value.motion'],
+    ['1.1', 'value.number'],
+    ['approval', 'state'],
+    ['rounded', 'value.shape'],
+    ['1.9', 'value.number'],
+    ['done', 'state'],
+    ['green', 'value.color'],
+    ['flush', 'value.motion'],
+    ['1.6', 'value.number'],
+  ]) {
+    assert.equal(scopeOf(word), scope, `${word} must paint as ${scope}`)
+  }
+  assert.equal(
+    painted.filter((token) => token.text.trim() !== '' && token.scope === 'invalid').length,
+    0,
+    'nothing in the shipped document is painted as a mistake',
+  )
+  // The `key=value` spelling is painted too: the key is a property and its `=` an operator,
+  // and both the hover text and the unknown-option check are keyed on that scope.
+  const keyed = scan('running shape=none', grammar).tokens
+  assert.equal(keyed.find((token) => token.text === 'shape')?.scope, 'property')
+  assert.equal(keyed.find((token) => token.text === '=')?.scope, 'operator')
+
+  // ── the problems, and where they point ────────────────────────────────────
+  // One deliberate mistake per line, so every diagnostic's range can be checked against the
+  // text it underlines. Three of them are errors the host parser also reports; the fourth is
+  // the warning it does NOT — `parseStyle` writes `color=mauve` into the rule and lets the
+  // shipped colour stand in silence, which is the difference this grammar exists to close.
+  const broken = [
+    'running circl',
+    'waiting shap=circle',
+    'nonsense circle',
+    'done color=mauve',
+  ].join('\n')
+  const problems = inspect(broken, grammar).diagnostics
+  /** @param needle - the text a diagnostic should underline. @returns it, if any. */
+  const at = (needle) => {
+    const from = broken.indexOf(needle)
+    return problems.find((problem) => problem.from === from && problem.to === from + needle.length)
+  }
+  assert.deepEqual(
+    problems.map((problem) => problem.code).sort(),
+    ['bad-option-value', 'bad-value', 'unknown-option', 'vocabulary:state'],
+    'the document has exactly the four mistakes it was written with',
+  )
+  assert.match(at('nonsense')?.message ?? '', /Unknown state "nonsense"/, 'an unknown state is named')
+  assert.match(at('shap')?.message ?? '', /Unknown option "shap"/, 'an unknown option key is named')
+  assert.match(at('circl')?.message ?? '', /not a valid shape/, 'a word that fits no slot is measured against the free one')
+  assert.equal(at('circl')?.severity, 'error', 'and it is an error, because the line does not draw what it says')
+  assert.match(at('color=mauve')?.message ?? '', /not a color/, 'a bad option value is reported rather than swallowed')
+  assert.equal(at('color=mauve')?.severity, 'warning', 'as a warning: the shipped default still draws')
+
+  // ── what can come next ────────────────────────────────────────────────────
+  /** @param text - the document. @param caret - where the caret is. @returns the row labels. */
+  const rowsAt = (text, caret) => {
+    const result = complete(inspect(text, grammar), grammar, { text, caret, trigger: 'explicit' })
+    return (result?.rows ?? []).map((row) => row.item.label)
+  }
+
+  // An empty line offers the states, in the order the plugin lists them.
+  assert.deepEqual(rowsAt('', 0), plugin.STYLE_STATES, 'the head of a line offers every state')
+  // And the list has to survive the first letter: `runn|` is still the state word, which is
+  // what the engine's `firstWord` predicate exists for.
+  const typing = complete(inspect('runn', grammar), grammar, { text: 'runn', caret: 4, trigger: 'explicit' })
+  assert.deepEqual(typing?.rows.map((row) => row.item.label), ['running'], 'the state stays offered while it is typed')
+  assert.deepEqual(typing?.range, { from: 0, to: 4 }, 'and the range covers what has been typed')
+
+  // After the state word the next slot's values lead, and the keys follow them.
+  const afterState = rowsAt('running ', 8)
+  assert.deepEqual(afterState.slice(0, plugin.SHAPES.length), plugin.SHAPES, 'the free slot is the shape slot')
+  const keyRows = afterState.filter((label) => label.endsWith('='))
+  assert.ok(keyRows.length > 0, 'and the option keys are offered after the values')
+  for (const label of keyRows) {
+    assert.ok(
+      plugin.STYLE_OPTIONS.includes(label.slice(0, -1)),
+      `${label} must be a key the parser accepts`,
+    )
+  }
+  // Filling the shape moves the list on to the colour slot.
+  assert.deepEqual(
+    rowsAt('running circle ', 15).slice(0, Object.keys(plugin.PRESET_COLORS).length),
+    Object.keys(plugin.PRESET_COLORS),
+    'the slot after a shape is the colour slot',
+  )
+
+  // ── the vocabularies are the plugin's, not a copy ─────────────────────────
+  // The proof that the grammar reads the constants rather than carrying its own: replace one
+  // and the grammar follows. A second copy would go on accepting the shipped words.
+  const overridden = plugin.dshSentryStyleGrammar({
+    states: ['idle'],
+    shapes: ['blob'],
+    colors: { teal: '#008080' },
+    motions: plugin.MOTIONS_LIST,
+    patterns: plugin.PATTERNS,
+    options: plugin.STYLE_OPTIONS,
+    defaults: plugin.DEFAULT_LOOK,
+  })
+  assert.deepEqual(inspect('idle blob', overridden).diagnostics, [], 'a replaced vocabulary accepts what it names')
+  assert.equal(
+    scan('idle blob', overridden).tokens.find((token) => token.text === 'blob')?.scope,
+    'value.shape',
+    'and paints it as a shape',
+  )
+  assert.equal(
+    inspect('running blob', overridden).diagnostics.find((problem) => problem.code === 'vocabulary:state')?.from,
+    0,
+    'a state the vocabulary no longer names is rejected at its own word',
+  )
+  assert.match(
+    inspect('idle circle', overridden).diagnostics.find((problem) => problem.code === 'bad-value')?.message ?? '',
+    /blob/,
+    'a shape it no longer ships is measured against the words that replaced it',
+  )
+  assert.deepEqual(inspect('idle blob color=teal', overridden).diagnostics, [], 'a replaced palette entry is accepted')
+  assert.equal(
+    inspect('idle blob color=blue', overridden).diagnostics.find(
+      (problem) => problem.code === 'bad-option-value',
+    )?.severity,
+    'warning',
+    'and a colour it no longer names is reported',
+  )
+  // The converse, so the assertions above cannot pass by accident: the shipped grammar knows
+  // `running`, `circle`, and `blue`, and has never heard of `idle`.
+  assert.deepEqual(inspect('running circle blue', grammar).diagnostics, [], 'the shipped grammar accepts its own words')
+  assert.equal(
+    inspect('idle circle', grammar).diagnostics.find((problem) => problem.code === 'vocabulary:state')?.from,
+    0,
+    'and rejects the words that replaced them',
+  )
+}
+
 {
   // The badge carries an exact count only where a digit is unambiguous.
   const one = plugin.sentryFavicon(planFor(['waiting']), OPTIONS)
@@ -1050,6 +1226,86 @@ function rangeInputs(tree) {
   assert.ok(reset !== undefined, 'the row must offer a reset')
   reset.props.onClick()
   assert.equal(resets, 1)
+}
+
+// ── the style document's field is an editor ─────────────────────────────────
+//
+// The difference that matters is not cosmetic: a controlled textarea rewrote its value on
+// every keystroke, and that single call is what destroyed the browser's undo stack and reset
+// the caret. So the field is now a host element the editor mounts into from an effect.
+//
+// What is assertable HERE is only the shape, because the editor needs a real document and
+// this file runs in Node with a stubbed React whose `useEffect` does nothing. That the editor
+// actually mounts, highlights, and keeps its undo stack is asserted in a real browser by
+// `scripts/browser-check.mjs`.
+{
+  const written = []
+  const tree = plugin.SettingText({
+    label: 'appearance',
+    hint: 'one line per state',
+    value: plugin.DEFAULT_STYLE,
+    help: { summary: 'reference', sections: [{ title: 'syntax', lines: ['state shape colour'] }] },
+    onChange: (next) => written.push(next),
+  })
+  const hosts = collectElements(tree).filter(
+    (element) => element.props?.className === 'dsh-sentry-editor',
+  )
+  assert.equal(hosts.length, 1, 'the style document must render exactly one editor host')
+  assert.equal(
+    collectElements(tree).filter((element) => element.type === 'textarea').length,
+    0,
+    'the style document must not render a bare textarea',
+  )
+  assert.ok(hosts[0].props.ref !== undefined, 'the editor host must carry the ref the effect mounts into')
+  // The reference is not decoration: it is the interface for a language whose vocabulary is
+  // closed, and it stays even though the editor now explains a token on hover.
+  assert.equal(
+    collectElements(tree).filter((element) => element.type === 'details').length,
+    1,
+    'the reference block must stay',
+  )
+  // Nothing may be written to the setting during render: the editor reports the user's typing
+  // from an effect and an event, never as a side effect of drawing.
+  assert.deepEqual(written, [], 'rendering the field must not write the setting')
+}
+
+// ── the editor was compiled in, and the shell is not asked for it ───────────
+//
+// The editor is not a platform singleton, so the bundle cannot `require` it: the shell's
+// module table would not have it, and the failure would appear only in the browser, as a
+// plugin that never loads. It is compiled in instead, and these assertions are what make that
+// a checked fact rather than a claim about the build.
+//
+// There is exactly ONE compiled-in module, and that count is the architecture: the library
+// ships no syntax, so the grammar for this plugin's DSL is this repo's own file, spliced in
+// from `src/` and never named in a `require`.
+{
+  const aliases = source.match(/let _citisen_litearea[a-z_]* = \(function \(\) \{/g) ?? []
+  assert.equal(
+    aliases.length,
+    1,
+    'the editor must be the only compiled-in library; the grammar is this plugin’s own module',
+  )
+  assert.ok(
+    !/require\(["']@citisen\/litearea/.test(source),
+    'the compiled-in editor must not be asked of the module table',
+  )
+  assert.ok(
+    !/require\(["']\.\.?\//.test(source),
+    'a module of this repo must be spliced in at build time, never asked of the module table',
+  )
+  // The inlined modules declare their exports rather than leaving an `export` statement, which
+  // would not parse in a classic script.
+  assert.ok(
+    source.includes('return { ') && !/^export /m.test(source),
+    'a compiled-in module must hand its names back rather than export them',
+  )
+  // The editor's own stylesheet travels with it, because the library injects it: a bundle
+  // without those rules would render an unstyled box.
+  assert.ok(
+    source.includes('.litearea-layer') && source.includes('.litearea-popup'),
+    'the compiled-in editor must carry its stylesheet',
+  )
 }
 
 // ── apply(ctx) end to end ───────────────────────────────────────────────────

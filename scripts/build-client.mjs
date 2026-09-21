@@ -61,6 +61,8 @@ const ENVELOPE_EXPORTS = [
   'PRESET_COLORS',
   'DEFAULT_STYLE',
   'STYLE_STATES',
+  'STYLE_OPTIONS',
+  'dshSentryStyleGrammar',
   'parseStyle',
   'resolveStyle',
   'CHIME_NOTES',
@@ -82,7 +84,157 @@ const ENVELOPE_EXPORTS = [
   'resolveSettings',
   'createRowStore',
   'AlertRow',
+  'SettingText',
 ]
+
+/**
+ * Third-party modules compiled INTO the bundle, by specifier.
+ *
+ * DSH's shell seeds a fixed module table, so a plugin may only `import` a platform
+ * singleton. The documented route for anything else is `dsh.client.external` plus a second
+ * client bundle the plugin ships — which means another `<script>`, another roster row, and a
+ * host that has to cooperate in loading it.
+ *
+ * A single-file bundle is easier to trust, so the editor is compiled in instead. Its built
+ * ESM is self-contained — no imports of its own — which makes inlining it a matter of
+ * stripping the one `export` statement at the end and handing the names back. The cost is
+ * real and worth stating: this bundle grows by the editor's whole compiled size. The
+ * alternative is a plugin with no working editor in it.
+ *
+ * The dependency is a devDependency, because the code it contributes is copied in here and
+ * is not resolved from `node_modules` at runtime — not on the host, and not in the browser.
+ *
+ * The editor is the only library in the map. Its sibling `./grammars` entry point is
+ * deliberately absent: litearea ships no syntax of its own, so the grammar for this plugin's
+ * DSL is this repo's own module and is spliced in by `LOCAL_MODULES` below. A change that
+ * reaches for a grammar here is reaching for the wrong architecture.
+ */
+const VENDORED = new Map([['@citisen/litearea', 'dist/index.js']])
+
+/** The trailing `export { … }` a bundled ESM module ends with. */
+const EXPORT_BLOCK = /\nexport \{([\s\S]*?)\};?\s*$/
+
+/**
+ * The declaration that compiles one vendored module into the envelope.
+ *
+ * The module is wrapped in its own function scope so its top-level names cannot collide with
+ * the template's, and its body is left exactly as published — not re-indented — so a reader
+ * debugging the bundle sees what the package actually shipped.
+ * @param spec - the specifier the template imported.
+ * @param file - the built file, relative to that package's root.
+ * @returns the declaration line.
+ * @throws {Error} when the package is not installed or its output is not inlinable.
+ */
+function vendorDeclaration(spec, file) {
+  const packageDir = spec.startsWith('@')
+    ? spec.split('/').slice(0, 2).join('/')
+    : (spec.split('/')[0] ?? spec)
+  const path = join(root, 'node_modules', packageDir, file)
+  let source
+  try {
+    source = readFileSync(path, 'utf8')
+  } catch {
+    throw new Error(
+      `build-client: ${spec} is not installed (${path} is missing); run \`npm install\``,
+    )
+  }
+  // A source map reference would point at a map the bundle has no relationship with. Every one
+  // is removed rather than the last: the built file carries the comment twice, which is a quirk
+  // of the bundler's output, and a strip that assumed one occurrence left the other sitting
+  // between the module and its `export`.
+  const withoutMap = source.replace(/(?:\r?\n)?\/\/# sourceMappingURL=.*/g, '').trimEnd()
+  const block = EXPORT_BLOCK.exec(withoutMap)
+  if (block === null) {
+    throw new Error(
+      `build-client: ${spec} does not end in a single \`export { … }\` statement, so it cannot be compiled in`,
+    )
+  }
+  const bindings = (block[1] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '')
+    .map((entry) => {
+      // `local as exported`, or a name that is already both.
+      const parts = entry.split(/\s+as\s+/)
+      const local = parts[0] ?? ''
+      const exported = parts[1] ?? local
+      return `${exported}: ${local}`
+    })
+  if (bindings.length === 0) {
+    throw new Error(`build-client: ${spec} exports nothing`)
+  }
+  return `\t\tlet ${aliasFor(spec)} = (function () {\n${withoutMap.slice(0, block.index).trimEnd()}\n\t\treturn { ${bindings.join(', ')} };\n\t\t})();\n`
+}
+
+/**
+ * This plugin's own modules, by the specifier `src/client.js` imports them with.
+ *
+ * A local module cannot go in `VENDORED`, which is a list of third-party files, and it
+ * cannot be `require`d either: the shell's module table holds the platform singletons, and
+ * this bundle is one factory rather than a module graph. So the file is read at build time
+ * and spliced in where its import stood — the same reasoning as the vendored edit above,
+ * with the text coming from `src/` instead of `node_modules/`.
+ *
+ * A spliced module shares the factory's scope, so it may declare only names the template
+ * does not. `src/style-grammar.js` keeps everything but its factory inside the factory for
+ * exactly that reason: a top-level constant there would be a second `SHAPES` beside the
+ * plugin's own. For the same reason a spliced module may not import another relative module
+ * — the splice is one level deep, which is all this plugin has ever needed, and the failure
+ * is loud rather than silent.
+ */
+const LOCAL_MODULES = new Map([['./style-grammar.js', 'style-grammar.js']])
+
+/** A static named import of a relative specifier, matched as a whole line. */
+const LOCAL_IMPORT_PATTERN = /^import\s+\{(?<named>[^{}]*)\}\s*from\s*'(?<spec>\.{1,2}\/[^']+)'\s*$/gm
+
+/**
+ * Splice the template's own modules in where it imported them.
+ *
+ * The import disappears rather than becoming a binding: the module's declarations are now in
+ * this scope, so the name it was imported as is already bound. Every imported name is checked
+ * against the file that is supposed to declare it, because the alternative is an undefined
+ * name — which parses perfectly and fails only in the browser.
+ * @param source - the template source.
+ * @returns the source with each local import replaced by that module's text.
+ * @throws {Error} when an import names a module or a declaration the build cannot find.
+ */
+function inlineLocalModules(source) {
+  const spliced = []
+  return source.replace(LOCAL_IMPORT_PATTERN, (...args) => {
+    const { named, spec } = args.at(-1)
+    const file = LOCAL_MODULES.get(spec)
+    if (file === undefined) {
+      throw new Error(
+        `build-client: src/client.js imports "${spec}", which no LOCAL_MODULES entry claims; add it there, or declare the dependency in dsh.client.external`,
+      )
+    }
+    if (spliced.includes(file)) {
+      throw new Error(`build-client: src/client.js imports ${file} twice, and the build splices it once`)
+    }
+    spliced.push(file)
+    const path = join(root, 'src', file)
+    let text
+    try {
+      text = readFileSync(path, 'utf8')
+    } catch {
+      throw new Error(`build-client: ${spec} is missing (${path})`)
+    }
+    for (const entry of named.split(',')) {
+      const name = entry.trim()
+      if (name === '') continue
+      const declaration = new RegExp(
+        `^(?:export )?(?:const|let|var|function|class) ${name}\\b`,
+        'm',
+      )
+      if (!declaration.test(text)) {
+        throw new Error(
+          `build-client: ${file} does not declare \`${name}\`, which src/client.js imports from it`,
+        )
+      }
+    }
+    return text.trimEnd()
+  })
+}
 
 /**
  * The fish path is a generated constant: `scripts/fish-path.mjs` lifts it out of
@@ -180,7 +332,9 @@ function rewriteImports(source) {
     const groups = args.at(-1)
     const { default: defaultName, named, spec } = groups
     matched += 1
-    requested.push(spec)
+    // One entry per distinct specifier: a spliced local module imports the same library the
+    // template does, and a report that named it twice would read like two dependencies.
+    if (!requested.includes(spec)) requested.push(spec)
 
     const generated = aliasFor(spec)
     // A default import binds the alias itself (`let _react = require("react")`
@@ -203,6 +357,9 @@ function rewriteImports(source) {
       }
       namedBindings.push([spec, trimmed])
     }
+    // A compiled-in module declares its alias in the prelude instead of asking the module
+    // table for it, so the import site becomes a note rather than a `require`.
+    if (VENDORED.has(spec)) return `\t\t// ${spec} is compiled in above`
     return `\t\tlet ${generated} = require(${JSON.stringify(spec)});`
   })
 
@@ -298,7 +455,7 @@ function stripExports(body) {
  * @param body - transformed, export-stripped template source.
  * @returns the complete bundle text.
  */
-function wrap(body) {
+function wrap(body, prelude = '') {
   const exports = ENVELOPE_EXPORTS.map((name) => `\t\texports.${name} = ${name};`).join('\n')
   return `window.__ModuleLoader__.load({
 \tid: ${JSON.stringify(PACKAGE_NAME)},
@@ -306,7 +463,7 @@ function wrap(body) {
 \t\tvar module = { exports: {} };
 \t\tvar exports = module.exports;
 \t\tObject.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
-${body.trimEnd()}
+${prelude}${body.trimEnd()}
 ${exports}
 \t\treturn module.exports;
 \t}
@@ -322,19 +479,29 @@ ${exports}
 function compile() {
   const template = readFileSync(sourcePath, 'utf8')
   const { body: withFish } = substituteFish(template)
-  const { body, requested, namedBindings, defaultBindings } = rewriteImports(withFish)
+  // The template's own modules are spliced in BEFORE the imports are rewritten, so a spliced
+  // module's `import` of the vendored library goes through the same pass as the template's
+  // own — there is no second set of import rules for it, and nothing to keep in step.
+  const { body, requested, namedBindings, defaultBindings } = rewriteImports(
+    inlineLocalModules(withFish),
+  )
 
   for (const spec of requested) {
-    if (!PLATFORM_SINGLETONS.has(spec)) {
-      throw new Error(
-        `build-client: src/client.js imports "${spec}", which is not a platform singleton; declare it in dsh.client.external and ship it as its own client bundle`,
-      )
-    }
+    if (PLATFORM_SINGLETONS.has(spec) || VENDORED.has(spec)) continue
+    throw new Error(
+      `build-client: src/client.js imports "${spec}", which is not a platform singleton; declare it in dsh.client.external and ship it as its own client bundle, or compile it in via VENDORED`,
+    )
   }
+
+  const prelude = [...VENDORED]
+    .filter(([spec]) => requested.includes(spec))
+    .map(([spec, file]) => vendorDeclaration(spec, file))
+    .join('')
 
   return {
     bundle: wrap(
       substituteIdentity(qualifyImports(stripExports(body), { namedBindings, defaultBindings })),
+      prelude,
     ),
     requested,
   }

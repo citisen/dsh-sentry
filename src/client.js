@@ -39,6 +39,8 @@
 
 import React from 'react'
 import { defineStore } from '@deepseek-ai/dsh-client-store'
+import { createEditor } from '@citisen/litearea'
+import { dshSentryStyleGrammar } from './style-grammar.js'
 
 /** Settings namespace owned by this plugin (mirrors the host half). */
 const SENTRY_NAMESPACE = 'alert'
@@ -304,6 +306,16 @@ const DEFAULT_STYLE = [
 const STYLE_STATES = ['running', 'waiting', 'approval', 'done']
 
 /**
+ * The option keys a rule may write as `key=value`.
+ *
+ * Declared once because two readers have to agree on it: `parseStyle` accepts
+ * exactly these keys, and the editor's grammar offers exactly these — the grammar
+ * takes the list as an option rather than carrying its own. Two lists that happen to
+ * agree today is how a suggestion comes to offer a key the parser then reports.
+ */
+const STYLE_OPTIONS = ['shape', 'color', 'pattern', 'motion', 'speed', 'bg']
+
+/**
  * Whether a bare token is a legal value for one positional slot.
  *
  * The check exists so a typo is *reported* rather than quietly landing in a slot
@@ -342,7 +354,6 @@ function parseStyle(text) {
   const problems = []
   if (typeof text !== 'string' || text.trim() === '') return { rules, problems }
 
-  const OPTIONS = ['shape', 'color', 'pattern', 'motion', 'speed', 'bg']
   const POSITIONAL = ['shape', 'color', 'pattern', 'motion', 'speed']
 
   let current
@@ -367,7 +378,7 @@ function parseStyle(text) {
       const key = equals === -1 ? undefined : token.slice(0, equals)
       const value = equals === -1 ? undefined : token.slice(equals + 1)
 
-      if (key !== undefined && OPTIONS.includes(key)) {
+      if (key !== undefined && STYLE_OPTIONS.includes(key)) {
         // `pattern=none` is how a document says "carve nothing" now that the bare
         // word belongs to the shape slot. It is the same fact either way.
         current[key] = value
@@ -1321,8 +1332,11 @@ const ROW_CSS = [
   '.dsh-sentry-preview{align-items:center;gap:6px;border:.5px solid var(--dsw-alias-border-l4);background:0 0;color:var(--dsw-alias-label-primary);cursor:pointer;border-radius:10px;padding:5px 12px;font-family:inherit;font-size:12px;line-height:18px;display:inline-flex}',
   '.dsh-sentry-preview:hover{background:var(--dsw-alias-interactive-bg-hover)}',
   '.dsh-sentry-style{flex-direction:column;gap:8px;display:flex}',
-  '.dsh-sentry-textarea{box-sizing:border-box;width:100%;resize:vertical;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;padding:8px 10px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:12px;line-height:18px;tab-size:2}',
-  '.dsh-sentry-textarea:focus{outline:none;border-color:var(--dsw-alias-state-business-primary)}',
+  '.dsh-sentry-editor{display:block}',
+  // The editor's own stylesheet is injected by the library; these bind its appearance to the
+  // interface's design tokens, so the box matches every other field and follows the theme
+  // switch rather than the operating system's colour scheme.
+  '.dsh-sentry-editor .litearea-box{border-width:.5px}',
   '.dsh-sentry-help{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
   '.dsh-sentry-help>summary{cursor:pointer;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary));font-size:12px;line-height:18px}',
   '.dsh-sentry-helpSection{margin-top:8px}',
@@ -1454,18 +1468,104 @@ const NUMBER_UI = {
 }
 
 /**
- * The style document, and the reference needed to write one.
+ * The design tokens the editor is themed with, as litearea custom properties.
  *
- * A text area and a `<details>` block rather than a form. The point of the DSL is
- * that the appearance is four combinations of four primitives; expressing that as
- * controls would take a dozen of them and still not say what one line says. So the
- * help text is not decoration — it *is* the interface, and it lists the closed
+ * CSS stays the theme language: the editor's whole appearance is already described by
+ * custom properties, so binding them to the interface's own tokens is what makes the box
+ * look native instead of like a control that wandered in from somewhere else. Setting them
+ * here rather than in the stylesheet also means they follow the INTERFACE's theme switch,
+ * not the operating system's — the library's own dark palette is driven by
+ * `prefers-color-scheme`, and those two are not the same thing.
+ *
+ * Deliberately not mapped: the per-scope colours. The library's palette is chosen to be
+ * legible on its own light and dark surfaces, and overriding the surface while leaving the
+ * scopes alone is right for the common case where the two schemes agree.
+ */
+const EDITOR_VARIABLES = {
+  font: 'var(--ds-font-family-code, ui-monospace, monospace)',
+  'font-size': '12px',
+  'line-height': '18px',
+  'padding-block': '8px',
+  'padding-inline': '10px',
+  radius: '8px',
+  fg: 'var(--dsw-alias-label-primary)',
+  'fg-dim': 'var(--dsw-alias-label-tertiary)',
+  'fg-strong': 'var(--dsw-alias-label-primary)',
+  bg: 'var(--dsw-alias-bg-module-platform)',
+  'bg-raised': 'var(--dsw-alias-bg-layer-2)',
+  border: 'var(--dsw-alias-border-l4)',
+  'border-focus': 'var(--dsw-alias-state-business-primary)',
+  accent: 'var(--dsw-alias-state-business-primary)',
+  error: 'var(--dsw-alias-state-error-primary)',
+  warning: 'var(--dsw-alias-state-warn-primary)',
+  shadow: 'var(--dsw-elevation-panel)',
+}
+
+/**
+ * The style document, the reference needed to write one, and the editor over it.
+ *
+ * A `<details>` block rather than a form, and now a real editor rather than a text area.
+ * The point of the DSL is that the appearance is four combinations of four primitives;
+ * expressing that as controls would take a dozen of them and still not say what one line
+ * says. So the help text is not decoration — it *is* the interface, and it lists the closed
  * vocabulary the parser accepts.
+ *
+ * The textarea this replaces was controlled: every keystroke round-tripped through the
+ * store and the value was written back, which is what destroyed the browser's undo stack
+ * and reset the caret. The editor owns the text instead, and reports what the user typed.
  *
  * @param props - React props.
  * @returns the item element.
  */
 function SettingText({ label, hint, value, help, onChange }) {
+  const hostRef = React.useRef(null)
+  const editorRef = React.useRef(undefined)
+  // The newest props, so the editor's own callbacks are never a render behind.
+  const latest = React.useRef({ onChange })
+  latest.current = { onChange }
+
+  React.useEffect(() => {
+    const host = hostRef.current
+    if (host === null || host === undefined) return undefined
+    const editor = createEditor(host, {
+      // The vocabularies come from this plugin's own constants, so the editor cannot offer a
+      // shape or a motion the parser would then reject.
+      grammar: dshSentryStyleGrammar({
+        states: STYLE_STATES,
+        shapes: SHAPES,
+        motions: MOTIONS_LIST,
+        colors: PRESET_COLORS,
+        patterns: PATTERNS,
+        options: STYLE_OPTIONS,
+        defaults: DEFAULT_LOOK,
+      }),
+      value: latest.current.value,
+      ariaLabel: label,
+      // The state list is four lines and the reference below explains them; growing to a
+      // dozen and then scrolling keeps the row from pushing the rest of the settings away.
+      sizing: { minRows: 5, maxRows: 12 },
+      variables: EDITOR_VARIABLES,
+      onChange: (next) => {
+        latest.current.onChange(next)
+      },
+    })
+    editorRef.current = editor
+    return () => {
+      editor.destroy()
+      editorRef.current = undefined
+    }
+  }, [])
+
+  // A value that arrived from elsewhere — the Reset button, another tab — takes the field
+  // over. Our own write coming back does not, and neither does anything at all while the
+  // user is in the field: that would be the plugin rewriting their typing.
+  React.useEffect(() => {
+    const editor = editorRef.current
+    if (editor === undefined) return
+    if (editor.focused) return
+    if (editor.value !== value) editor.setValue(value)
+  }, [value])
+
   return React.createElement(
     'div',
     { className: 'dsh-sentry-style' },
@@ -1475,16 +1575,7 @@ function SettingText({ label, hint, value, help, onChange }) {
       React.createElement('div', { className: 'dsh-sentry-itemLabel' }, label),
       React.createElement('div', { className: 'dsh-sentry-itemHint' }, hint),
     ),
-    React.createElement('textarea', {
-      className: 'dsh-sentry-textarea',
-      spellCheck: false,
-      rows: 5,
-      value,
-      'aria-label': label,
-      onChange: (event) => {
-        onChange(event.target.value)
-      },
-    }),
+    React.createElement('div', { className: 'dsh-sentry-editor', ref: hostRef }),
     React.createElement(
       'details',
       { className: 'dsh-sentry-help' },
