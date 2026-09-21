@@ -381,3 +381,4 @@ failing check instead of a silently-green favicon.
 ## License
 
 MIT
+

@@ -349,21 +349,53 @@ const OPTIONS = { reducedMotion: false }
 {
   // Each state is a composition of primitives, and the composition is the whole
   // model: a background shape and colour, a carved pattern, a motion, a rate.
+  //
+  // Motion is checked as a function of the tick, not as an animation element. That
+  // is the point of the split: `turn` may be left to SMIL because it is stateless,
+  // while `blink` and `flush` change the drawing and are driven by the plugin — so
+  // the thing to verify is what the drawing looks like at each tick, which needs no
+  // browser and no clock.
   const running = plugin.sentryFavicon(planFor(['running']), OPTIONS)
-  assert.ok(running.includes('<animateTransform attributeName="transform" type="rotate"'), 'running turns')
-  assert.ok(running.includes('dur="3s"'), 'at its own rate')
+  assert.ok(!running.includes('<animateTransform'), 'no declarative turn: the transform animation did not move')
+  assert.equal(plugin.tickInterval(plugin.DEFAULT_LOOK.running, false), 120, 'so the plugin drives it')
 
-  const waiting = plugin.sentryFavicon(planFor(['waiting']), OPTIONS)
-  assert.ok(waiting.includes('<animate attributeName="opacity"'), 'waiting blinks')
-  assert.ok(waiting.includes('dur="1.1s"'), 'fast')
+  // A blink is a dim flag that alternates once per breath, at each state's own rate.
+  assert.equal(plugin.tickInterval(plugin.DEFAULT_LOOK.waiting, false), 120, 'waiting is driven')
+  const waitingHalf = Math.round((1.1 * 1000) / 2 / 120)
+  const waitingTicks = Array.from({ length: waitingHalf * 2 }, (_, tick) => plugin.motionTick(plugin.DEFAULT_LOOK.waiting, tick).dim === true)
+  assert.equal(waitingTicks[0], false, 'a breath starts bright')
+  assert.equal(waitingTicks[waitingHalf - 1], false, 'and holds')
+  assert.equal(waitingTicks[waitingHalf], true, 'then dims')
+  assert.equal(waitingTicks[waitingHalf * 2 - 1], true, 'for the second half')
+  assert.equal(plugin.motionTick(plugin.DEFAULT_LOOK.waiting, waitingHalf * 2).dim, false, 'and starts over')
 
-  const approval = plugin.sentryFavicon(planFor(['approval']), OPTIONS)
-  assert.ok(approval.includes('<animate attributeName="opacity"'), 'an approval blinks too')
-  assert.ok(approval.includes('dur="1.9s"'), 'but slowly — the rate is the only thing telling them apart')
+  // The two waiting states share a colour on purpose — the rate is the only thing
+  // telling them apart — so the dim cadence must actually differ.
+  const approvalHalf = Math.round((1.9 * 1000) / 2 / 120)
+  assert.notEqual(waitingHalf, approvalHalf, 'the approval breath is longer')
+  assert.equal(plugin.motionTick(plugin.DEFAULT_LOOK.approval, waitingHalf).dim, false, 'so it is still bright where a question has dimmed')
 
-  const done = plugin.sentryFavicon(planFor(['done']), OPTIONS)
-  assert.ok(done.includes('<animate attributeName="fill"'), 'a completion pulses the colour')
-  assert.ok(done.includes('fill="#22c55e"'), 'on a green background')
+  // A completion pulses the colour, once per period.
+  const flushTicks = Math.round((1.6 * 1000) / 120)
+  assert.equal(plugin.motionTick(plugin.DEFAULT_LOOK.done, 0).color, '#22c55e', 'a completion starts green')
+  assert.equal(plugin.motionTick(plugin.DEFAULT_LOOK.done, flushTicks).color, '#4d6bfe', 'pulses blue')
+  assert.equal(plugin.motionTick(plugin.DEFAULT_LOOK.done, flushTicks * 2).color, '#22c55e', 'and returns')
+  const done = plugin.sentryFavicon(planFor(['done']), { ...OPTIONS, motion: { color: '#4d6bfe' } })
+  assert.ok(done.includes('fill="#4d6bfe"'), 'and the pulse is what gets painted')
+
+  // A driven turn steps the angle, which is the fallback for a browser that does
+  // not animate the transform: the same whole turn per period, in TICK_MS steps.
+  const turnTicks = Math.round((3 * 1000) / 120)
+  assert.equal(plugin.motionTick(plugin.DEFAULT_LOOK.running, 0).angle, 0)
+  assert.equal(plugin.motionTick(plugin.DEFAULT_LOOK.running, turnTicks / 2).angle, 180)
+  assert.equal(plugin.motionTick(plugin.DEFAULT_LOOK.running, turnTicks).angle, 0, 'and wraps')
+  const turned = plugin.sentryFavicon(planFor(['running']), {
+    ...OPTIONS,
+    style: { ...plugin.DEFAULT_LOOK, running: { ...plugin.DEFAULT_LOOK.running, driven: true } },
+    motion: { angle: 90 },
+  })
+  assert.ok(turned.includes('rotate(90 16 16)'), 'a driven turn rotates the carvings')
+  assert.ok(!turned.includes('<animateTransform'), 'and emits no declarative animation to disagree with')
 
   // A question and an approval share a colour on purpose: both mean "act", and the
   // rate is the distinction. If they ever diverge, this catches it.
@@ -377,14 +409,18 @@ const OPTIONS = { reducedMotion: false }
   const rounded = plugin.sentryFavicon(planFor(['waiting']), OPTIONS)
   assert.ok(rounded.includes('<rect x="0.8" y="0.8" width="30.4" height="30.4" rx="8"'), 'the waiting default is a rounded square')
 
-  // Reduced motion keeps the shape and drops the animation, so the state survives
-  // as a colour even when the motion does not.
+  // Reduced motion keeps the shape and drops the motion entirely: no declarative
+  // animation, and no timer either.
   for (const state of plugin.STYLE_STATES) {
+    const chosen = plugin.DEFAULT_LOOK[state]
+    assert.equal(plugin.tickInterval(chosen, true), undefined, `${state} must not be driven under reduced motion`)
     const calm = plugin.sentryFavicon(planFor([state]), { reducedMotion: true })
     assert.ok(!calm.includes('<animate'), `${state} must not animate under reduced motion`)
-    const color = plugin.PRESET_COLORS[plugin.DEFAULT_LOOK[state].color]
-    assert.ok(calm.includes(color), `${state} keeps its colour`)
+    assert.ok(calm.includes(plugin.PRESET_COLORS[chosen.color]), `${state} keeps its colour`)
   }
+
+  // A still state is still: no timer, no animation.
+  assert.equal(plugin.tickInterval({ ...plugin.DEFAULT_LOOK.running, motion: 'still' }, false), undefined)
 }
 
 {
@@ -479,27 +515,27 @@ const OPTIONS = { reducedMotion: false }
 }
 
 {
-  // Motion is SMIL and only where it means something, and each state's motion is
-  // its own: a disc that blinks for two different reasons has to be told apart by
-  // rate, because an icon this small has no room for a glyph.
-  const waiting = plugin.sentryFavicon(planFor(['waiting']), OPTIONS)
-  assert.ok(waiting.includes('<animate attributeName="opacity"'), 'waiting blinks')
-  assert.ok(!waiting.includes('animateTransform'), 'and does not turn')
-
-  const running = plugin.sentryFavicon(planFor(['running']), OPTIONS)
-  assert.ok(running.includes('<animateTransform attributeName="transform" type="rotate"'), 'running turns')
-  assert.ok(running.includes('values="0 16 16;360 16 16"'), 'a full turn per period')
-  assert.ok(!running.includes('<animate attributeName="opacity"'), 'and does not blink')
+  // Motion is driven by the plugin, so nothing here is an animation element: what
+  // matters is what the drawing looks like per tick, and the tick arithmetic is
+  // already covered above. What this block pins is that no state emits a
+  // declarative animation that could disagree with the driven one.
+  for (const state of plugin.STYLE_STATES) {
+    const svg = plugin.sentryFavicon(planFor([state]), OPTIONS)
+    assert.ok(!/<animate|animateTransform/.test(svg), `${state} must not rely on a declarative animation`)
+  }
 
   const done = plugin.sentryFavicon(planFor(['done']), OPTIONS)
-  assert.ok(done.includes('<animate attributeName="fill"'), 'a completion pulses the colour')
-  assert.ok(done.includes('fill="#22c55e"'), 'and the background is green')
+  assert.ok(done.includes('fill="#22c55e"'), 'a completion is green')
 
   // A question outranks a busy tab: one icon shows one colour, and the most urgent
   // fact is the one worth the whole background.
   const blocked = plugin.sentryFavicon(planFor(['waiting', 'running']), OPTIONS)
   assert.ok(blocked.includes('fill="#f59e0b"'), 'a question wins the colour')
-  assert.ok(blocked.includes('dur="1.1s"'), 'with the question\u2019s own rate')
+  assert.equal(
+    plugin.tickInterval(plugin.activeLook(planFor(['waiting', 'running'])), false),
+    120,
+    'and it is the question\u2019s motion that gets driven, not the busy one',
+  )
 
   // Reduced motion keeps the shape and drops the animation, so the state survives
   // as a colour even when the motion does not.
@@ -1265,6 +1301,7 @@ delete globalThis.window
 
 console.log('verify-client: OK — envelope, fish, session model, favicon, title, chime, settings row and engine verified')
 console.log(`verify-client: factory required ${requested.join(', ')}`)
+
 
 
 

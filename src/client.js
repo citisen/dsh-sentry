@@ -582,25 +582,91 @@ function patternShapes(look) {
 }
 
 /**
- * The motion for one look.
+ * The motion for one look, as a **static** animation element.
+ *
+ * Only `turn` is left to SMIL, and only because it is stateless: a rotating group
+ * is the same drawing at every instant, so a declarative animation costs nothing
+ * and needs no bookkeeping. `blink` and `flush` change something the drawing
+ * itself carries — a dim flag, a pulsing colour — and are driven by
+ * {@link motionTick} instead.
+ *
+ * That split is not an aesthetic choice. A favicon is rendered in a document the
+ * page does not own, and the motion categories do not have equal standing there:
+ * the first version of this relied on a transform animation for the spin and on
+ * presentation animations for the pulse, and was reported as "the animation does
+ * not move". Driving the repaint from the plugin removes the question entirely —
+ * the plugin already rebuilds the data URL on every state change, so a motion
+ * that is a function of time is the same code path with a timer in front of it.
+ *
  * @param look - the resolved appearance.
  * @param reducedMotion - whether the user asked for less movement.
  * @returns the SVG animation element, or `''`.
  */
 function motionElement(look, reducedMotion) {
-  if (reducedMotion) return ''
-  if (look.motion === 'turn') {
-    return `<animateTransform attributeName="transform" type="rotate" values="0 16 16;360 16 16" dur="${String(look.speed)}s" repeatCount="indefinite"/>`
-  }
+  return ''
+}
+
+/** How often a driven motion repaints, in milliseconds. */
+const TICK_MS = 120
+
+/**
+ * The colour a `flush` pulses toward.
+ * @param name - the preset name.
+ * @returns the partner hex.
+ */
+function flushPartner(name) {
+  return name === 'green' ? PRESET_COLORS.blue : PRESET_COLORS.green
+}
+
+/**
+ * What one repaint of a driven motion looks like.
+ *
+ * The result is handed straight to {@link sentryFavicon}, which makes a motion a
+ * function from a tick count to an appearance and nothing else — and therefore
+ * verifiable in Node, with no browser and no clock: `blink` dims on alternate
+ * half-periods, `flush` alternates the colour once per period, and `turn` steps
+ * the angle. Every rate is expressed in the seconds the DSL's `speed` already
+ * means, so a document that says `blink 1.1` still gets a 1.1-second breath.
+ *
+ * @param look - the resolved appearance.
+ * @param tick - a monotonically increasing tick count.
+ * @returns `{ angle, dim, color }` overrides for the draw.
+ */
+function motionTick(look, tick) {
   if (look.motion === 'blink') {
-    return `<animate attributeName="opacity" values="1;0.3;1" dur="${String(look.speed)}s" repeatCount="indefinite"/>`
+    // `speed` is seconds per full breath, so the dim half lasts half of it.
+    const halfTicks = Math.max(1, Math.round(((look.speed * 1000) / 2) / TICK_MS))
+    return { dim: Math.floor(tick / halfTicks) % 2 === 1 }
   }
   if (look.motion === 'flush') {
-    const other = PRESET_COLORS[look.color === 'green' ? 'blue' : 'green']
-    const own = PRESET_COLORS[look.color] ?? PRESET_COLORS.gray
-    return `<animate attributeName="fill" values="${own};${other};${own}" dur="${String(look.speed)}s" repeatCount="indefinite"/>`
+    const ticks = Math.max(1, Math.round((look.speed * 1000) / TICK_MS))
+    return {
+      color: Math.floor(tick / ticks) % 2 === 1 ? flushPartner(look.color) : PRESET_COLORS[look.color],
+    }
   }
-  return ''
+  if (look.motion === 'turn') {
+    const ticks = Math.max(1, Math.round((look.speed * 1000) / TICK_MS))
+    return { angle: round2(((tick % ticks) / ticks) * 360) }
+  }
+  return {}
+}
+
+/**
+ * How long one repaint interval lasts for a look, or undefined for a still one.
+ *
+ * Every motion is driven, `turn` included. The declarative transform animation is
+ * not used for the shipped appearance: it was the one that did not move, and a
+ * favicon is drawn in a document this plugin does not own, where the motion
+ * categories do not have equal standing. A timer for as long as something is
+ * animating is a small price for a motion that cannot silently do nothing.
+ *
+ * @param look - the resolved appearance.
+ * @param reducedMotion - whether the user asked for less movement.
+ * @returns the interval in milliseconds, or undefined.
+ */
+function tickInterval(look, reducedMotion) {
+  if (reducedMotion || look.motion === 'still') return undefined
+  return TICK_MS
 }
 
 // ─── the favicon ─────────────────────────────────────────────────────────────
@@ -622,6 +688,25 @@ function motionElement(look, reducedMotion) {
 const FISH_FULL_SCALE = 32 / 50
 
 /**
+ * The appearance the icon is drawn with right now.
+ *
+ * One tab has one background, so the dominant state decides the whole icon — and
+ * the most urgent fact is the one worth it: a question outranks a busy tab,
+ * because "someone is waiting for you" is not something a spinner should be able
+ * to hide.
+ *
+ * @param plan - the session plan.
+ * @param style - the resolved styles, or undefined for the shipped ones.
+ * @returns the look to draw.
+ */
+function activeLook(plan, style) {
+  const look = style ?? DEFAULT_LOOK
+  const blocking = plan.waiting > 0 ? 'waiting' : plan.approval > 0 ? 'approval' : undefined
+  const state = blocking ?? (plan.running > 0 ? 'running' : 'done')
+  return look[state] ?? DEFAULT_LOOK[state]
+}
+
+/**
  * The favicon, as an SVG string: a state-coloured background with the fish and the
  * state's pattern carved out of it.
  *
@@ -633,20 +718,15 @@ const FISH_FULL_SCALE = 32 / 50
  * disc that vanished entirely.
  *
  * @param plan - the session plan.
- * @param options - `{ reducedMotion, style }`, where `style` is the resolved look
- *   per state from {@link resolveStyle}.
+ * @param options - `{ reducedMotion, style, motion }`, where `style` is the
+ *   resolved look per state from {@link resolveStyle} and `motion` is the
+ *   per-tick override from {@link motionTick}.
  * @returns the SVG source, or undefined when there is nothing to show.
  */
 function sentryFavicon(plan, options) {
   if (!planHasSignal(plan)) return undefined
-  const { reducedMotion, style } = options
-  const look = style ?? DEFAULT_LOOK
-
-  // The dominant state decides the whole icon: one tab has one background, and the
-  // most urgent fact is the one worth it.
-  const blocking = plan.waiting > 0 ? 'waiting' : plan.approval > 0 ? 'approval' : undefined
-  const state = blocking ?? (plan.running > 0 ? 'running' : 'done')
-  const chosen = look[state] ?? DEFAULT_LOOK[state]
+  const { reducedMotion, style, motion = {} } = options
+  const chosen = activeLook(plan, style)
 
   // The fish, at full size, centered by construction: the translate puts the art's
   // own 50-unit centre on the canvas centre, so no margin arithmetic can drift it.
@@ -654,10 +734,15 @@ function sentryFavicon(plan, options) {
   const placed = `translate(${String(shift)} ${String(shift)}) scale(${String(FISH_FULL_SCALE)}) translate(-16 -16) translate(16 16)`
 
   // The mask is the background: everything drawn on it in black is carved out. The
-  // fish always comes first, so no pattern can ever cover it.
+  // fish always comes first, so no pattern can ever cover it. A driven turn rotates
+  // the carvings — not the painted layer — so the fish turns with the pattern, which
+  // is what a rotating dial looks like.
+  const spin = motion.angle === undefined ? undefined : round2(motion.angle)
   const carvings =
     `<g transform="${placed}"><path d="${FISH_PATH}" fill="#000" fill-rule="nonzero"/></g>` +
-    patternShapes(chosen)
+    (spin === undefined || spin === 0
+      ? patternShapes(chosen)
+      : `<g transform="rotate(${String(spin)} 16 16)">${patternShapes(chosen)}</g>`)
 
   const mask =
     `<mask id="disc" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">` +
@@ -671,11 +756,16 @@ function sentryFavicon(plan, options) {
         `<text x="26.6" y="8.4" font-size="9" font-weight="700" text-anchor="middle" fill="#0b0d10">${plan.waiting}</text>`
       : ''
 
+  // A driven motion dims the whole icon; SMIL would have animated `opacity`, and
+  // this is the same idea expressed as a value the caller computes.
+  const dimmed = motion.dim === true
+  const paint = motion.color ?? PRESET_COLORS[chosen.color] ?? PRESET_COLORS.gray
+
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
     `<defs>${mask}</defs>` +
-    `<g>${motionElement(chosen, reducedMotion)}` +
-    `<rect x="0" y="0" width="32" height="32" fill="${PRESET_COLORS[chosen.color] ?? PRESET_COLORS.gray}" mask="url(#disc)"/>` +
+    `<g${dimmed ? ' opacity="0.3"' : ''}>${motionElement(chosen, reducedMotion)}` +
+    `<rect x="0" y="0" width="32" height="32" fill="${paint}" mask="url(#disc)"/>` +
     `</g>` +
     badge +
     `</svg>`
@@ -1627,6 +1717,9 @@ export function apply(ctx) {
     unfocused: false,
     media: undefined,
     lastSoundAt: undefined,
+    tick: 0,
+    motionTimer: undefined,
+    motionInterval: undefined,
   }
 
   /** The translation seat for the title, bound to the row's own namespace. */
@@ -1707,14 +1800,22 @@ export function apply(ctx) {
    * settings change, because the parse is a few string splits over at most a
    * dozen lines — cheaper than the bookkeeping a cache would need, and it means a
    * document edited in `settings.yaml` and reloaded cannot go stale.
+   *
+   * The motion override comes from the tick, which is what makes a driven motion
+   * work: `blink` dims, `flush` pulses the colour, `turn` steps the angle, and
+   * every one of them is just an argument to this same draw.
    */
   const applyIcon = () => {
+    const style = resolveStyle(state.settings.style).look
+    const chosen = activeLook(state.plan, style)
+    const override = state.tick === 0 ? {} : motionTick(chosen, state.tick)
     const svg =
       state.settings.favicon === false
         ? undefined
         : sentryFavicon(state.plan, {
             reducedMotion: prefersReducedMotion(),
-            style: resolveStyle(state.settings.style).look,
+            style,
+            motion: override,
           })
     if (svg === undefined) {
       icon.remove()
@@ -1756,6 +1857,36 @@ export function apply(ctx) {
     applyIcon()
     applyTitle()
     applySound(alerts)
+    applyMotion()
+  }
+
+  /**
+   * Start, keep, or stop the repaint timer a driven motion needs.
+   *
+   * The timer is owned by the state rather than by the draw, and its interval is
+   * the motion's own tick. It is stopped the moment nothing is animating — which
+   * matters more than it looks: a background tab's timers are throttled, but an
+   * idle tab with no sessions should not be holding one at all. The one exception
+   * is a `turn` the browser can animate itself, which sets no timer and costs
+   * nothing.
+   */
+  const applyMotion = () => {
+    const style = resolveStyle(state.settings.style).look
+    const chosen = activeLook(state.plan, style)
+    const interval =
+      state.settings.favicon === false ? undefined : tickInterval(chosen, prefersReducedMotion())
+    const wanted = interval ?? null
+    if (wanted === state.motionInterval) return
+    if (state.motionTimer !== undefined) {
+      clearInterval(state.motionTimer)
+      state.motionTimer = undefined
+    }
+    state.motionInterval = wanted
+    if (wanted === null) return
+    state.motionTimer = setInterval(() => {
+      state.tick += 1
+      applyIcon()
+    }, wanted)
   }
 
   // ── wiring ────────────────────────────────────────────────────────────────
@@ -1825,6 +1956,8 @@ export function apply(ctx) {
 
   ctx.effect(
     () => () => {
+      if (state.motionTimer !== undefined) clearInterval(state.motionTimer)
+      state.motionTimer = undefined
       icon.remove()
       chime.dispose()
     },
@@ -1927,4 +2060,6 @@ function safeStorage() {
     return undefined
   }
 }
+
+
 

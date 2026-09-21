@@ -48,6 +48,11 @@ const ENVELOPE_EXPORTS = [
   'SHAPES',
   'PATTERNS',
   'MOTIONS_LIST',
+  'TICK_MS',
+  'motionTick',
+  'tickInterval',
+  'flushPartner',
+  'activeLook',
   'TIPS',
   'DEFAULT_LOOK',
   'PRESET_COLORS',
@@ -385,6 +390,7 @@ if (process.argv.includes('--check')) {
 } else {
   build()
 }
+
 
 
 
