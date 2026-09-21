@@ -78,7 +78,9 @@ const page = `<!doctype html>
 <script>
   const plugin = window.__PLUGIN__
   const scenarios = [
-    { label: 'running', waiting: 0, running: 1, disc: 'blue', carved: true },
+    { label: 'running (fish turning)', waiting: 0, running: 1, disc: 'blue', carved: true, angle: 0 },
+    { label: 'running, turned 45 degrees', waiting: 0, running: 1, disc: 'blue', carved: true, angle: 45 },
+    { label: 'running, turned 90 degrees', waiting: 0, running: 1, disc: 'blue', carved: true, angle: 90 },
     { label: 'waiting', waiting: 1, running: 0, disc: 'amber', carved: true, digit: 1 },
     { label: 'approval', waiting: 0, approval: 1, running: 0, disc: 'amber', carved: true },
     { label: 'just finished', waiting: 0, running: 0, done: 1, disc: 'green', carved: true },
@@ -133,7 +135,10 @@ const page = `<!doctype html>
         finished: scenario.done ? ['a'] : [],
         waiting: scenario.waiting, approval: scenario.approval ?? 0, running: scenario.running, done: scenario.done ?? 0,
       }
-      const svg = plugin.sentryFavicon(plan, { reducedMotion: false })
+      const svg = plugin.sentryFavicon(plan, {
+        reducedMotion: false,
+        motion: scenario.angle === undefined || scenario.angle === 0 ? {} : { angle: scenario.angle },
+      })
       out.push({ label: scenario.label, ...scenario, ...(await sample(svg)) })
     }
     return out
@@ -201,8 +206,13 @@ try {
     })
 
   /** @param expression - the page expression. @returns its value. */
-  const evaluate = async (expression) =>
-    (await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result.value
+  const evaluate = async (expression) => {
+    const result = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
+    if (result.exceptionDetails !== undefined) {
+      throw new Error('the page threw: ' + (result.exceptionDetails.exception?.description ?? result.exceptionDetails.text))
+    }
+    return result.result.value
+  }
 
   const expectedDisc = { blue: 'blue', amber: 'amber', green: 'green' }
 
@@ -279,5 +289,6 @@ try {
 }
 
 process.exit(failures === 0 ? 0 : 1)
+
 
 

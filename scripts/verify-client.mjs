@@ -338,12 +338,53 @@ const OPTIONS = { reducedMotion: false }
     'centered at full size',
   )
 
-  // The shipped running state carves two spokes with a dot on each tip: the dot is
-  // what makes a bar read as a hand rather than as a slot.
-  assert.ok(mask.includes('<rect x="14.6" y="2.8"'), 'the running state carves spokes')
-  assert.ok(mask.includes('<circle cx="16" cy="4.2" r="2.6" fill="#000"/>'), 'each spoke carries its tip')
-  assert.equal(mask.split('<rect x="14.6"').length - 1, 2, 'two spokes')
-  assert.equal(mask.split('rotate(').length - 1, 2, 'placed opposite each other')
+  // Nothing is carved but the fish. The dial-like patterns — spokes, hands, petals,
+  // windmill, dots, rays — were all tried at 16px and all read as noise around a
+  // fish nobody could then see, so the vocabulary is down to `none` and the icon
+  // says its state with colour, shape, motion, and the fish itself.
+  assert.deepEqual(plugin.PATTERNS, ['none'], 'the pattern vocabulary is only `none`')
+  assert.equal(mask.split('<rect').length - 1, 1, 'the only rect in the mask is its own black base')
+  assert.equal(mask.split('<circle').length - 1, 1, 'and the only circle is the background outline')
+}
+
+{
+  // The running state turns the fish itself. A `turn` is a driven motion, so what
+  // this pins is the geometry: the fish stays centered, it shrinks just enough that
+  // its swept corners stay inside the background, and the background does not move.
+  const still = plugin.sentryFavicon(planFor(['running']), { ...OPTIONS, motion: { angle: 0 } })
+  const turned = plugin.sentryFavicon(planFor(['running']), { ...OPTIONS, motion: { angle: 90 } })
+
+  const turnScale = 0.64 * plugin.FISH_TURN_SCALE
+  const turnShift = Math.round((16 - 16 * turnScale) * 100) / 100
+  assert.ok(
+    turned.includes(`translate(${String(turnShift)} ${String(turnShift)}) scale(${String(Math.round(turnScale * 1e6) / 1e6)})`),
+    'a turning fish shrinks to keep its swept corners inside the background',
+  )
+  assert.ok(turned.includes('rotate(90 16 16)'), 'and rotates about the canvas centre')
+  assert.ok(
+    turned.split('rotate(').length - 1 === 1,
+    'only the fish rotates — a turning background would read as a spinning badge',
+  )
+
+  // The scale is chosen so the swept circle fits: the widest half-extent of the
+  // 50x50 art is 25 units, so the radius at this scale must stay under the
+  // background's own 15.2.
+  assert.ok(
+    plugin.FISH_SWEPT_RADIUS < 15.2,
+    `the swept radius ${String(plugin.FISH_SWEPT_RADIUS)} must fit inside the background's 15.2`,
+  )
+  assert.ok(
+    plugin.FISH_SWEPT_RADIUS > 13.5,
+    'and the fish must not be shrunk further than the geometry requires',
+  )
+
+  // A still fish is at full size: the shrink exists for the turn, not for the icon.
+  const fullShift = Math.round((16 - 16 * 0.64) * 100) / 100
+  assert.ok(
+    still.includes(`translate(${String(fullShift)} ${String(fullShift)}) scale(0.64) translate(-16 -16) translate(16 16)`),
+    'a still fish stays full size',
+  )
+  assert.ok(!still.includes('rotate('), 'and does not rotate')
 }
 
 {
@@ -401,7 +442,8 @@ const OPTIONS = { reducedMotion: false }
   // rate is the distinction. If they ever diverge, this catches it.
   assert.equal(plugin.DEFAULT_LOOK.waiting.color, plugin.DEFAULT_LOOK.approval.color)
   assert.notEqual(plugin.DEFAULT_LOOK.waiting.speed, plugin.DEFAULT_LOOK.approval.speed)
-  assert.equal(plugin.DEFAULT_LOOK.running.pattern, 'spokes')
+  assert.equal(plugin.DEFAULT_LOOK.running.motion, 'turn', 'the running state turns the fish')
+  assert.equal(plugin.DEFAULT_LOOK.running.pattern, 'none', 'and carves no pattern around it')
   assert.equal(plugin.PRESET_COLORS[plugin.DEFAULT_LOOK.done.color], '#22c55e')
 
   // The two shapes the user asked for: rounded exists, and `none` really means no
@@ -435,24 +477,31 @@ const OPTIONS = { reducedMotion: false }
     assert.deepEqual(shipped.look[state], plugin.DEFAULT_LOOK[state], `${state} round-trips through the DSL`)
   }
 
-  // A positional line and a key=value line describe the same thing.
-  // `rectangle` is not a shape, so it is placed — and refused — positionally, and
-  // the line's later tokens still land in their own slots.
+  // A positional line and a key=value line describe the same thing. `rectangle` is
+  // not a shape and `petals` is no longer a pattern, so both are refused and the
+  // line's remaining tokens still land in their own slots.
   const positional = plugin.resolveStyle('running rectangle blue petals still 2').look.running
-  const keyed = plugin.resolveStyle('running shape=circle color=amber pattern=dots tip=arrow motion=turn speed=4').look.running
+  const keyed = plugin.resolveStyle('running shape=square color=amber pattern=none motion=turn speed=4').look.running
   assert.equal(positional.shape, plugin.DEFAULT_LOOK.running.shape, 'an unknown positional shape is refused')
   assert.equal(positional.color, 'blue', 'a known colour is taken')
-  assert.equal(positional.pattern, 'petals', 'and a known pattern')
+  assert.equal(
+    positional.pattern,
+    plugin.DEFAULT_LOOK.running.pattern,
+    'a pattern that is no longer in the vocabulary is refused rather than drawn',
+  )
   assert.equal(positional.motion, 'still', 'and a known motion')
   assert.equal(positional.speed, 3, 'with its rate')
-  assert.deepEqual(keyed, { shape: 'circle', color: 'amber', pattern: 'dots', marks: 0, tip: 'none', motion: 'turn', speed: 4 })
+  assert.deepEqual(keyed, { shape: 'square', color: 'amber', pattern: 'none', motion: 'turn', speed: 4 })
 
-  // `spokes=3` is one token that sets two fields, which is how the shipped
-  // defaults are written.
-  const shorthand = plugin.resolveStyle('running circle blue spokes=3 arrow turn 4').look.running
-  assert.equal(shorthand.pattern, 'spokes')
-  assert.equal(shorthand.marks, 3)
-  assert.equal(shorthand.tip, 'arrow')
+  // The dial vocabulary is gone: those names must now be reported rather than
+  // silently accepted, or a document written against an older release would look
+  // like it did something.
+  const stale = plugin.resolveStyle('running circle blue spokes=2 turn 3')
+  assert.ok(
+    stale.problems.some((problem) => problem.includes('spokes')),
+    'a removed pattern is reported rather than ignored',
+  )
+  assert.deepEqual(stale.look.running, plugin.DEFAULT_LOOK.running, 'and the shipped look stands')
 
   // Fields a line omits keep that state's shipped value.
   const partial = plugin.resolveStyle('done color=purple').look.done
@@ -474,12 +523,15 @@ const OPTIONS = { reducedMotion: false }
   assert.equal(plugin.resolveStyle('running speed=999').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
 
   // A document is what drives the icon, end to end: the same state, two styles.
-  const styled = plugin.resolveStyle('running rounded purple rays still 4').look
+  const styled = plugin.resolveStyle('running rounded purple none still 4').look
   const svg = plugin.sentryFavicon(planFor(['running']), { reducedMotion: false, style: styled })
   assert.ok(svg.includes('fill="#8b5cf6"'), 'the document chooses the colour')
   assert.ok(svg.includes('rx="8"'), 'and the shape')
-  assert.ok(svg.includes('<rect x="15.3" y="1.8"'), 'and the pattern')
-  assert.ok(!svg.includes('<animate'), 'and still means still')
+  assert.ok(!svg.includes('rotate('), 'and still means still')
+
+  // Out-of-range numbers keep the default rather than drawing something absurd.
+  assert.equal(plugin.resolveStyle('running speed=0').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
+  assert.equal(plugin.resolveStyle('running speed=999').look.running.speed, plugin.DEFAULT_LOOK.running.speed)
 
   // Comments and blank lines are ignored, and a colour that is not a preset is
   // refused rather than passed through to the SVG.
@@ -1301,6 +1353,8 @@ delete globalThis.window
 
 console.log('verify-client: OK — envelope, fish, session model, favicon, title, chime, settings row and engine verified')
 console.log(`verify-client: factory required ${requested.join(', ')}`)
+
+
 
 
 

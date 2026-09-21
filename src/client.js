@@ -259,8 +259,17 @@ function planHasSignal(plan) {
 /** The background shapes a rule may name. */
 const SHAPES = ['circle', 'rounded', 'square', 'none']
 
-/** The patterns a rule may carve out of the background. */
-const PATTERNS = ['none', 'hands', 'spokes', 'petals', 'windmill', 'dots', 'rays']
+/**
+ * The patterns a rule may carve out of the background.
+ *
+ * Only `none` remains, and that is a finding rather than an omission: every
+ * pattern that did not involve the fish itself was tried on a real 16px favicon
+ * and read as noise — clock hands made the icon look like a watch, petals and
+ * windmill blades turned it into a smudge. The vocabulary stays so a document
+ * written against an earlier release still parses, and so the slot is still there
+ * for a pattern that earns its place.
+ */
+const PATTERNS = ['none']
 
 /** The motions a rule may apply. */
 const MOTIONS_LIST = ['still', 'turn', 'blink', 'flush']
@@ -287,10 +296,10 @@ const PRESET_COLORS = {
 
 /** What an unconfigured install draws. */
 const DEFAULT_STYLE = [
-  'running  circle  blue   spokes=2 dot  turn   3',
-  'waiting  rounded amber  none          blink  1.1',
-  'approval rounded amber  none          blink  1.9',
-  'done     circle  green  none          flush  1.6',
+  'running  circle  blue   none  turn   3',
+  'waiting  rounded amber  none  blink  1.1',
+  'approval rounded amber  none  blink  1.9',
+  'done     circle  green  none  flush  1.6',
 ].join('\n')
 
 /** The states a document may address, in the order the help text lists them. */
@@ -425,21 +434,13 @@ function resolveLook(rule, defaults) {
         : defaults.color
   const pattern = PATTERNS.includes(rule.pattern) ? rule.pattern : defaults.pattern
   const motion = MOTIONS_LIST.includes(rule.motion) ? rule.motion : defaults.motion
-  const tip = TIPS.includes(rule.tip) ? rule.tip : defaults.tip
-  const marks = Number.parseInt(rule.marks ?? '', 10)
   const speed = Number.parseFloat(rule.speed ?? '')
 
-  // A count only means something for a pattern that repeats or radiates. Carrying
-  // one over from the state's default would silently multiply a `petals` or `dots`
-  // drawing that has its own fixed count.
-  const counted = pattern === 'spokes' || pattern === 'hands'
   return {
     shape,
     color,
     pattern,
     motion,
-    tip: counted ? tip : 'none',
-    marks: counted ? (Number.isFinite(marks) && marks >= 0 && marks <= 12 ? marks : defaults.marks) : 0,
     speed: Number.isFinite(speed) && speed >= 0.2 && speed <= 20 ? speed : defaults.speed,
   }
 }
@@ -450,16 +451,20 @@ function resolveLook(rule, defaults) {
  * These are the defaults the documentation quotes, and the ones a rule inherits
  * field by field: naming only a colour in a document keeps the shipped shape,
  * pattern, and motion for that state.
+ *
+ * `running` turns the **fish**, not a pattern. A dial-like ring of spokes was
+ * tried and read as a watch face rather than as a state; the fish is the thing
+ * this icon is about, so the fish is the thing that moves.
  */
 const DEFAULT_LOOK = {
-  running: { shape: 'circle', color: 'blue', pattern: 'spokes', marks: 2, tip: 'dot', motion: 'turn', speed: 3 },
-  waiting: { shape: 'rounded', color: 'amber', pattern: 'none', marks: 0, tip: 'none', motion: 'blink', speed: 1.1 },
-  approval: { shape: 'rounded', color: 'amber', pattern: 'none', marks: 0, tip: 'none', motion: 'blink', speed: 1.9 },
-  done: { shape: 'circle', color: 'green', pattern: 'none', marks: 0, tip: 'none', motion: 'flush', speed: 1.6 },
+  running: { shape: 'circle', color: 'blue', pattern: 'none', motion: 'turn', speed: 3 },
+  waiting: { shape: 'rounded', color: 'amber', pattern: 'none', motion: 'blink', speed: 1.1 },
+  approval: { shape: 'rounded', color: 'amber', pattern: 'none', motion: 'blink', speed: 1.9 },
+  done: { shape: 'circle', color: 'green', pattern: 'none', motion: 'flush', speed: 1.6 },
 }
 
 /** The appearance a document resolves to, per state. */
-const STYLE_FALLBACK_LOOK = { shape: 'none', color: 'gray', pattern: 'none', marks: 0, tip: 'none', motion: 'still', speed: 1 }
+const STYLE_FALLBACK_LOOK = { shape: 'none', color: 'gray', pattern: 'none', motion: 'still', speed: 1 }
 
 /**
  * Resolve a whole document against the shipped defaults.
@@ -478,14 +483,15 @@ function resolveStyle(text) {
 
 // ─── the primitives ──────────────────────────────────────────────────────────
 
+
 /**
- * Round to two decimals, so float noise like `5.6000000000000005` does not reach
- * a data URL that is rebuilt on every state change.
- * @param value - the number.
- * @returns the rounded number.
+ * Removes the now-empty tip vocabulary's helper.
+ * @param tip - the tip name.
+ * @returns an empty string; the vocabulary is gone.
  */
-function round2(value) {
-  return Math.round(value * 100) / 100
+function tipShape(tip) {
+  void tip
+  return ''
 }
 
 /**
@@ -528,56 +534,23 @@ function tipShape(tip) {
 /**
  * The carved pattern for one look.
  *
- * Every mark is drawn black, because black is what the mask cuts away: the disc
- * is the only thing with a colour, and everything carved out of it shows the tab
- * bar through. That is the whole reason the icon survives a browser theme this
- * plugin cannot see.
+ * Every mark is drawn black, because black is what the mask cuts away: the
+ * background is the only thing with a colour, and everything carved out of it
+ * shows the tab bar through. That is the whole reason the icon survives a browser
+ * theme this plugin cannot see.
+ *
+ * Nothing here survives the vocabulary except the fish, which is carved by
+ * {@link sentryFavicon} itself rather than by this function. The dial-like
+ * patterns this used to draw — spokes, hands, petals, windmill, dots, rays — were
+ * all tried at the real 16px size and all of them read as noise around a fish
+ * nobody could then see. A shape slot with one legal value is not a wasted slot:
+ * it is the record of a question that got answered.
  *
  * @param look - the resolved appearance.
  * @returns the SVG elements.
  */
 function patternShapes(look) {
-  const count = look.marks > 0 ? look.marks : 2
-  let markup = ''
-  if (look.pattern === 'spokes' || look.pattern === 'hands') {
-    for (let index = 0; index < count; index += 1) {
-      markup +=
-        `<g transform="rotate(${String(round2((360 / count) * index))} 16 16)">` +
-        (look.pattern === 'hands'
-          ? '<rect x="14.7" y="3.4" width="2.6" height="11.6" rx="1.3" fill="#000"/>'
-          : '<rect x="14.6" y="2.8" width="2.8" height="10.4" rx="1.4" fill="#000"/>') +
-        tipShape(look.tip) +
-        '</g>'
-    }
-    return markup
-  }
-  if (look.pattern === 'petals') {
-    for (let index = 0; index < 12; index += 1) {
-      markup += `<g transform="rotate(${String(index * 30)} 16 16)"><ellipse cx="16" cy="4.8" rx="1.4" ry="3" fill="#000"/></g>`
-    }
-    return markup
-  }
-  if (look.pattern === 'windmill') {
-    for (let index = 0; index < 4; index += 1) {
-      markup += `<g transform="rotate(${String(index * 90)} 16 16)"><path d="M16 16 L16 3.4 A12.6 12.6 0 0 1 26.9 9.5 Z" fill="#000"/></g>`
-    }
-    return markup
-  }
-  if (look.pattern === 'rays') {
-    for (let index = 0; index < 8; index += 1) {
-      markup += `<g transform="rotate(${String(index * 45)} 16 16)"><rect x="15.3" y="1.8" width="1.4" height="5.6" rx="0.7" fill="#000"/></g>`
-    }
-    return markup
-  }
-  if (look.pattern === 'dots') {
-    for (let index = 0; index < 8; index += 1) {
-      const angle = (Math.PI * 2 * index) / 8
-      const x = round2(16 + Math.sin(angle) * 12.2)
-      const y = round2(16 - Math.cos(angle) * 12.2)
-      markup += `<circle cx="${String(x)}" cy="${String(y)}" r="1.5" fill="#000"/>`
-    }
-    return markup
-  }
+  void look
   return ''
 }
 
@@ -672,6 +645,15 @@ function tickInterval(look, reducedMotion) {
 // ─── the favicon ─────────────────────────────────────────────────────────────
 
 /**
+ * Round to two decimals, so float noise like `5.6000000000000005` does not reach
+ * a data URL that is rebuilt on every state change.
+ * @param value - the number.
+ * @returns the rounded number.
+ */
+function round2(value) {
+  return Math.round(value * 100) / 100
+}
+/**
  * The fish's own scale: the shipped art is a 50×50 drawing, so placing it at full
  * size in the 32px canvas is exactly `32/50`.
  *
@@ -680,12 +662,55 @@ function tickInterval(look, reducedMotion) {
  * 16px favicon that is a ~5-pixel glyph inside a nearly-invisible ring, which is
  * what "both are unclear" meant. At full size the fish *is* the icon.
  *
- * One consequence is worth stating: the art is nearly as wide as it is tall, so at
- * full size it reaches the background's edge. The fish is carved rather than
- * painted precisely so that this is legible rather than cramped — there is no
- * stroke to collide with, only the tab bar showing through.
+ * One consequence is worth stating: the art is wider than it is tall, so at full
+ * size it reaches the background's edge. The fish is carved rather than painted
+ * precisely so that this is legible rather than cramped — there is no stroke to
+ * collide with, only the tab bar showing through.
  */
 const FISH_FULL_SCALE = 32 / 50
+
+/**
+ * The art's largest half-extent, in its own 50-unit space.
+ *
+ * Measured from the path's own bounding box in a browser — 48.34 wide by 36.32
+ * tall, centred at (25.17, 25.16) — rather than assumed. Half of the larger axis
+ * is how far the glyph reaches from its centre, and that is the number a rotation
+ * has to fit inside the background.
+ */
+const FISH_HALF_EXTENT = 24.17
+
+/**
+ * The radius the turning fish is allowed to sweep, in canvas units.
+ *
+ * The background's edge is at 15.2, and this leaves a little air so the glyph
+ * never touches the rim mid-turn.
+ */
+const FISH_TURN_RADIUS = 14.3
+
+/**
+ * How much the fish shrinks when it turns.
+ *
+ * A wide glyph rotating about its centre sweeps a circle of its larger half-extent,
+ * so at full size this fish would reach `24.17 × 0.64 ≈ 15.5` — past the
+ * background's 15.2 edge, clipping twice per revolution, which at 16px reads as a
+ * flicker rather than as a turn. Deriving the scale from the measured extent keeps
+ * the glyph as large as it can be while staying inside, and means the constant
+ * cannot drift away from the art it was computed for.
+ *
+ * The alternative — keep it full size and let it clip — was rejected: the whole
+ * point of carving the fish is that its silhouette is always complete.
+ */
+const FISH_TURN_SCALE = round2(FISH_TURN_RADIUS / (FISH_HALF_EXTENT * FISH_FULL_SCALE))
+
+/**
+ * The radius the turning fish actually sweeps at that scale.
+ *
+ * This is the number that must stay inside the background, so it is named and
+ * checked rather than left as a claim in a comment.
+ */
+const FISH_SWEPT_RADIUS = round2(FISH_HALF_EXTENT * FISH_FULL_SCALE * FISH_TURN_SCALE)
+
+
 
 /**
  * The appearance the icon is drawn with right now.
@@ -728,21 +753,28 @@ function sentryFavicon(plan, options) {
   const { reducedMotion, style, motion = {} } = options
   const chosen = activeLook(plan, style)
 
-  // The fish, at full size, centered by construction: the translate puts the art's
-  // own 50-unit centre on the canvas centre, so no margin arithmetic can drift it.
-  const shift = round2(16 - 16 * FISH_FULL_SCALE)
-  const placed = `translate(${String(shift)} ${String(shift)}) scale(${String(FISH_FULL_SCALE)}) translate(-16 -16) translate(16 16)`
+  // The fish, centered by construction: the translate puts the art's own 50-unit
+  // centre on the canvas centre, so no margin arithmetic can drift it.
+  //
+  // A `turn` rotates the fish itself, about the canvas centre. That is the state
+  // indicator the running state gets: the icon is *about* this glyph, so the glyph
+  // is what moves, and nothing else has to be drawn to say "working". The scale
+  // drops a little while it turns so the swept corners stay inside the background
+  // (see {@link FISH_TURN_SCALE}).
+  const spin = motion.angle === undefined || motion.angle === 0 ? 0 : round2(motion.angle)
+  const scale = spin === 0 ? FISH_FULL_SCALE : FISH_FULL_SCALE * FISH_TURN_SCALE
+  const shift = round2(16 - 16 * scale)
+  const placed =
+    `translate(${String(shift)} ${String(shift)}) scale(${String(scale)}) translate(-16 -16) translate(16 16)`
+  const fish = `<g transform="${placed}"><path d="${FISH_PATH}" fill="#000" fill-rule="nonzero"/></g>`
 
-  // The mask is the background: everything drawn on it in black is carved out. The
-  // fish always comes first, so no pattern can ever cover it. A driven turn rotates
-  // the carvings — not the painted layer — so the fish turns with the pattern, which
-  // is what a rotating dial looks like.
-  const spin = motion.angle === undefined ? undefined : round2(motion.angle)
+  // The mask is the background: everything drawn on it in black is carved out, so
+  // the fish is negative space and its silhouette is always the tab bar showing
+  // through. Rotating it here rather than on the painted layer is what keeps the
+  // background's outline still — a turning background would read as a spinning
+  // badge, not as a working fish.
   const carvings =
-    `<g transform="${placed}"><path d="${FISH_PATH}" fill="#000" fill-rule="nonzero"/></g>` +
-    (spin === undefined || spin === 0
-      ? patternShapes(chosen)
-      : `<g transform="rotate(${String(spin)} 16 16)">${patternShapes(chosen)}</g>`)
+    spin === 0 ? fish : `<g transform="rotate(${String(spin)} 16 16)">${fish}</g>` + patternShapes(chosen)
 
   const mask =
     `<mask id="disc" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">` +
@@ -1174,11 +1206,10 @@ const zh = {
   'alert.style.help': '语法与原语说明',
   'alert.style.syntax': '语法',
   'alert.style.syntaxLine1': '每行一个状态：状态 形状 颜色 图案 动效 速度',
-  'alert.style.syntaxLine2': '前四项可以按顺序省略，也可以写成 键=值，例如 spokes=2 tip=arrow speed=1.4',
+  'alert.style.syntaxLine2': '前四项可以按顺序省略，也可以写成 键=值，例如 shape=rounded speed=1.4',
   'alert.style.syntaxLine3': '# 开头是注释；没写的字段沿用该状态的默认值',
   'alert.style.shapes': '形状 shape',
-  'alert.style.patterns': '图案 pattern',
-  'alert.style.tips': '辐条端点 tip',
+  'alert.style.patterns': '图案 pattern（目前只剩 none，试过的表盘类图案在 16px 下都只是噪点）',
   'alert.style.motions': '动效 motion',
   'alert.style.colors': '颜色 color（预设）',
   'alert.style.colorsLine': '只接受预设名，不接受任意色值：本插件出过的两次事故都是对比度问题（白鱼画在白底上），预设色不会犯这个错。',
@@ -1187,17 +1218,6 @@ const zh = {
   'alert.primitive.shape.rounded': '圆角矩形，鱼是横宽的，圆角矩形给它更好的留白',
   'alert.primitive.shape.square': '小圆角方形',
   'alert.primitive.shape.none': '不画背景，只剩镂空的鱼',
-  'alert.primitive.pattern.none': '除了鱼之外不镂空任何东西',
-  'alert.primitive.pattern.hands': '两根粗短条，像时针分针',
-  'alert.primitive.pattern.spokes': '从中心到边缘的细条，数量由 marks= 决定',
-  'alert.primitive.pattern.petals': '十二片花瓣，像菊花',
-  'alert.primitive.pattern.windmill': '四片风车叶',
-  'alert.primitive.pattern.dots': '边缘一圈圆点',
-  'alert.primitive.pattern.rays': '边缘一圈短线，像光芒',
-  'alert.primitive.tip.none': '端点不加东西',
-  'alert.primitive.tip.dot': '端点加一个圆点',
-  'alert.primitive.tip.arrow': '端点加一个三角箭头，方向感最强',
-  'alert.primitive.tip.bar': '端点加一小段横条',
   'alert.primitive.motion.still': '不动',
   'alert.primitive.motion.turn': '图案旋转，速度=转一圈的秒数',
   'alert.primitive.motion.blink': '整体闪烁，速度=一次呼吸的秒数',
@@ -1249,11 +1269,10 @@ const en = {
   'alert.style.help': 'Syntax and primitives',
   'alert.style.syntax': 'Syntax',
   'alert.style.syntaxLine1': 'one line per state: state shape colour pattern motion speed',
-  'alert.style.syntaxLine2': 'the first four may be positional, or written as key=value, e.g. spokes=2 tip=arrow speed=1.4',
+  'alert.style.syntaxLine2': '前四项可以按顺序省略，也可以写成 键=值，例如 shape=rounded speed=1.4',
   'alert.style.syntaxLine3': '# starts a comment; anything a line omits keeps that state\u2019s default',
   'alert.style.shapes': 'shape',
-  'alert.style.patterns': 'pattern',
-  'alert.style.tips': 'spoke tip',
+  'alert.style.patterns': 'pattern (only none remains; every dial-like pattern read as noise at 16px)',
   'alert.style.motions': 'motion',
   'alert.style.colors': 'colour (presets)',
   'alert.style.colorsLine': 'Preset names only, never a free colour: both failures this plugin has shipped were contrast failures, and a preset cannot be illegible.',
@@ -1262,17 +1281,6 @@ const en = {
   'alert.primitive.shape.rounded': 'a rounded square — the fish is wider than it is tall, and this gives it room',
   'alert.primitive.shape.square': 'a slightly rounded square',
   'alert.primitive.shape.none': 'no background at all; just the carved fish',
-  'alert.primitive.pattern.none': 'nothing carved but the fish',
-  'alert.primitive.pattern.hands': 'two thick short bars, like clock hands',
-  'alert.primitive.pattern.spokes': 'thin bars from the centre to the rim; how many is marks=',
-  'alert.primitive.pattern.petals': 'twelve petals, a chrysanthemum',
-  'alert.primitive.pattern.windmill': 'four windmill blades',
-  'alert.primitive.pattern.dots': 'a ring of dots at the rim',
-  'alert.primitive.pattern.rays': 'a ring of short ticks, like rays',
-  'alert.primitive.tip.none': 'no tip',
-  'alert.primitive.tip.dot': 'a dot on the tip',
-  'alert.primitive.tip.arrow': 'a triangular arrowhead — the strongest sense of direction',
-  'alert.primitive.tip.bar': 'a short crossbar on the tip',
   'alert.primitive.motion.still': 'still',
   'alert.primitive.motion.turn': 'the pattern turns; speed is seconds per revolution',
   'alert.primitive.motion.blink': 'the whole icon blinks; speed is seconds per breath',
@@ -2060,6 +2068,10 @@ function safeStorage() {
     return undefined
   }
 }
+
+
+
+
 
 
 

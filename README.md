@@ -30,7 +30,7 @@ that work while the page is in the background:
 
 | Channel | What it shows |
 | --- | --- |
-| Tab icon | A status ring around the original fish: an amber arc on the left for sessions waiting on you, a blue arc on the right for sessions working, and a corner digit with the number of open questions |
+| Tab icon | The original fish, carved out of a coloured background: the colour and shape carry the state, the running fish turns, and a corner digit counts open questions |
 | Tab title | A prefix, so the exact counts can be read as text: `① Waiting · My session — DeepSeek Harness` |
 | Sound | A synthesized chime — rising two notes for a question, one note for an approval, a soft low note for a completion |
 
@@ -63,34 +63,6 @@ rejected alternative:
   used would otherwise paint a "working" ring around an empty conversation the
   moment you opened a new tab.
 
-## The icon
-
-The fish is the product's own art, lifted byte-for-byte out of the shipped
-`dsh-web-frontend/dist/favicon.svg` by `scripts/fish-path.mjs` — not redrawn, not
-simplified. A ring goes around it, and the two state classes live on opposite
-halves so one 16-pixel icon can carry "two are working, one is waiting for me"
-without a legend:
-
-```
-        ╭───────────╮            ring track: amber / blue / green,
-     ╭──┤   ◉  ②    ├──╮         recolored rather than appearing
-     │  │  (fish)   │  │         and disappearing
-     ╰──┤           ├──╯
-        ╰───────────╯            ② = open questions (1–3; above
-       left arc: waiting          that the ring says "several")
-       right arc: working
-```
-
-Motion is SMIL, never a CSS transform: in the favicon replacement document a CSS
-`transform` has no reliable origin and renders as a wobble, while
-`animateTransform` with an explicit center does not. Rotation is emitted as eight
-45° steps rather than a smooth sweep, because a discrete tick is what a spinner
-means. With `prefers-reduced-motion` set, no animation is emitted at all and the
-arcs are drawn at full opacity instead — the counts survive, the motion does not.
-
-Honest about the size: **at 16px the fish is only about 5 pixels across.** It is
-there so the tab is recognizably *this* tab, not to be looked at. That is why the
-fish's share of the icon is a setting.
 
 ## The sound
 
@@ -175,22 +147,20 @@ switches could express that; they would also take a dozen interactions to say wh
 one line says. So it is one text document:
 
 ```
-running  circle  blue   spokes=2 dot  turn   3
-waiting  rounded amber  none          blink  1.1
-approval rounded amber  none          blink  1.9
-done     circle  green  none          flush  1.6
+running  circle  blue   none  turn   3
+waiting  rounded amber  none  blink  1.1
+approval rounded amber  none  blink  1.9
+done     circle  green  none  flush  1.6
 ```
 
 The syntax is line-oriented: one line per state, `key value` pairs, `#` starts a
 comment, and the leading tokens may be positional in the order shape, colour,
-pattern, motion, speed. `spokes=3` is one token that sets the pattern *and* its
-count. Anything a line omits keeps that state's shipped value.
+pattern, motion, speed. Anything a line omits keeps that state's shipped value.
 
 | Vocabulary | Values |
 | --- | --- |
 | shape | `circle` `rounded` `square` `none` |
-| pattern | `none` `hands` `spokes` `petals` `windmill` `dots` `rays` |
-| tip (for `spokes` / `hands`) | `none` `dot` `arrow` `bar` |
+| pattern | `none` (only — every dial-like pattern read as noise at 16px) |
 | motion | `still` `turn` `blink` `flush` |
 | colour | `blue` `amber` `green` `red` `purple` `gray` `dark` `light` |
 
@@ -226,11 +196,30 @@ Painting it instead produced a white shape on a coloured disc whose edges smeare
 at favicon size, and a black shape on a dark disc that vanished entirely. Both
 shipped; both were reported as "a white circle".
 
-Motion is SMIL and nothing else. In the favicon replacement document a CSS
-`transform` has no reliable origin and renders as a wobble, while
-`animateTransform` with an explicit center does not. With `prefers-reduced-motion`
-set, no animation is emitted at all — the shape and the colour survive, the motion
-does not.
+The state is carried by the background's **colour and shape**, by the **motion**,
+and by a corner digit for the question count. Nothing else is drawn on the icon:
+the dial-like patterns this once carved around the fish — spokes, clock hands,
+petals, windmill, dots, rays — were each rendered at the real 16px size and each
+read as noise around a fish nobody could then see. The `pattern` slot survives
+with `none` as its only value, which is the record of a question that got
+answered.
+
+### Motion
+
+A `turn` rotates **the fish**, about the centre of the canvas — the icon is *about*
+this glyph, so the glyph is what moves, and no extra mark has to be drawn to say
+"working". A turning fish is scaled down slightly (`FISH_TURN_SCALE`, derived from
+the art's measured half-extent) so the circle its corners sweep stays inside the
+background; at full size it would clip the rim twice per revolution, which at 16px
+reads as a flicker rather than as a turn.
+
+Motion is **driven by the plugin**, not declared in the SVG. A favicon is rendered
+in a document the page does not own, and the motion categories do not have equal
+standing there: an earlier version left the spin to an `<animateTransform>` and it
+did not move, while the colour pulse worked. So a motion is a function from a tick
+to an appearance — `blink` dims, `flush` pulses, `turn` steps the angle — and the
+engine repaints every 120 ms while something is animating. `prefers-reduced-motion`
+stops the timer, and an idle tab holds no timer at all.
 
 One honest consequence: the fish is only visible where the tab bar differs from the
 background. On a tab bar that happens to match, the background reads as a plain
@@ -354,9 +343,9 @@ failing check instead of a silently-green favicon.
   quiet, leaving the app's own link untouched. A second plugin that also writes a
   favicon would be the last one to mount; that is a conflict to settle in the
   interface, not by making this one quieter.
-- **A background tab's animations are throttled.** SMIL keeps running at a much
-  lower frame rate while the tab is hidden — the ring is still there and still
-  reads as busy, but the rotation is not smooth, and that is the browser's power
+- **A background tab's repaints are throttled.** The browser stretches the interval
+  between repaints while the tab is hidden — the icon is still in the right state
+  with the right colour, but the turn is not smooth. That is the browser's power
   policy rather than a bug.
 - **The title marker is a zero-width space.** It is invisible and it makes the
   composition honest; a tool that copies `document.title` verbatim (a bookmark
@@ -381,4 +370,6 @@ failing check instead of a silently-green favicon.
 ## License
 
 MIT
+
+
 

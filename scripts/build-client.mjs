@@ -53,7 +53,10 @@ const ENVELOPE_EXPORTS = [
   'tickInterval',
   'flushPartner',
   'activeLook',
-  'TIPS',
+  'FISH_TURN_SCALE',
+  'FISH_SWEPT_RADIUS',
+  'FISH_HALF_EXTENT',
+  'FISH_TURN_RADIUS',
   'DEFAULT_LOOK',
   'PRESET_COLORS',
   'DEFAULT_STYLE',
@@ -390,6 +393,8 @@ if (process.argv.includes('--check')) {
 } else {
   build()
 }
+
+
 
 
 
