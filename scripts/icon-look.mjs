@@ -162,6 +162,17 @@ try {
     return result.result.value
   }
 
+  // See icon-lab.mjs: the page target appears before the inline script has run, so
+  // wait for the entry point rather than reading `__run__` and blaming the icon.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const probed = await send('Runtime.evaluate', {
+      expression: 'typeof window.__run__',
+      returnByValue: true,
+    })
+    if (probed.result.value === 'function') break
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+
   const pageErrors = await evaluate('window.__errors__ ?? []')
   if (pageErrors.length > 0) { console.error('page errors:', pageErrors.join(' | ')) }
   const results = await evaluate('window.__run__()')

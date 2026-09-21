@@ -214,6 +214,30 @@ try {
     return result.result.value
   }
 
+  /**
+   * Wait until the page has defined its entry point.
+   *
+   * The page target exists from the moment the tab does, which is well before the
+   * document has parsed its inline script — so reading `__run__` once is a race,
+   * and it is one this check has lost: under load it reported
+   * `window.__run__ is not a function`, which is what a slow start looks like and
+   * not what a broken icon looks like. Waiting costs nothing when the page is
+   * already up, which is the usual case.
+   */
+  const waitForRun = async () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const probed = await send('Runtime.evaluate', {
+        expression: 'typeof window.__run__',
+        returnByValue: true,
+      })
+      if (probed.result.value === 'function') return
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    throw new Error('the page never defined window.__run__')
+  }
+
+  await waitForRun()
+
   const expectedDisc = { blue: 'blue', amber: 'amber', green: 'green' }
 
   for (const scheme of ['light', 'dark']) {

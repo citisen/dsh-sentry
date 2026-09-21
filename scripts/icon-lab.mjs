@@ -229,6 +229,19 @@ try {
     return result.result.value
   }
 
+  // The page target exists before the document's inline script has run, so asking
+  // for `__run__` straight away is a race — and one that reads as a broken lab
+  // under load rather than as a slow start. Wait for the entry point first, so the
+  // error list below is the page's own errors and not this file's impatience.
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const probed = await send('Runtime.evaluate', {
+      expression: 'typeof window.__run__',
+      returnByValue: true,
+    })
+    if (probed.result.value === 'function') break
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
+
   const errors = await evaluate('window.__errors__ ?? []')
   if (errors.length > 0) {
     console.error(`icon-lab: the page reported ${String(errors.length)} error(s):`)
