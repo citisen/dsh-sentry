@@ -154,15 +154,17 @@ npm run verify               # 只跑校验脚本
 npm run watch                # 保存即重建，配合 dsh-client-hmr
 ```
 
-三处检查各管一段，每一段都是前一段查不到的：
+五处检查各管一段，每一段都是前一段查不到的：
 
 | 检查 | 运行方式 | 覆盖 |
 | --- | --- | --- |
-| `verify-host.mjs` | Node | schema 的默认值与区间是否偏离浏览器半边的假设 |
+| `verify-host.mjs` | Node + 桩 | schema 的默认值与区间是否偏离浏览器半边的假设 |
+| `verify-settings.mjs` | Node + 真实 dsh 服务 | 界面依赖的那个命名空间契约：真实 settings 服务接受 `alert`、生效方式是 `live`，以及这个检查存在的理由 —— **宿主解析出的值**与**浏览器半边回退的默认值**必须是同一个值。它们处在无法共享模块的两个 bundle 里，只改一边的默认值会变成"渲染一个设置、执行另一个" |
 | `verify-client.mjs` | Node + 桩 | 全部纯决策：状态优先级、完成沿、图标几何、标题合成、声音门控、设置行，以及 `apply()` 对桩服务的端到端接线 |
 | `browser-check.mjs` | 无头 Chrome | 桩判断不了的三件事：浏览器是否**真的解码**了 favicon 的 data URL（一个没编码的 `#` 会在那里截断成半条鱼，且哪里都不报错）、DOM 契约是否成立（自己的 `<link>` 挂到 head、不碰应用自己的那个、自己移除自己的元素）、以及 `MutationObserver` 的标题守卫能否挺过浏览器自己的调度时机 |
+| `verify-profile.mjs` | Node + 真实 dsh profile | loader 是否真的组装了这个 bundle：`cordis.patch.yml` 那一行能解析、`dsh.profile.bundles` 里有它、浏览器名册能找到并投递 `lib/client.js` |
 
-没装 Chromium 系浏览器时浏览器检查会干净地跳过，因此 CI 里是安全的；设 `DSH_REQUIRE=1` 可以把跳过变成失败。
+后两项在缺少所需条件时（没有 Chromium、没有本地 dsh）会干净地跳过，因此 CI 里是安全的；设 `DSH_REQUIRE=1` 可以把任一种跳过变成失败。
 
 `src/client.js` 是浏览器半边的唯一来源。它写成 ES 模块便于阅读，但 DSH 客户端 bundle 是**经典脚本**，只能通过 `window.__ModuleLoader__` 注册一个惰性 CommonJS 工厂，所以 `scripts/build-client.mjs` 会套上那个外壳并改写静态 import（这也是里面没有 JSX 的原因 —— 那个变换刻意做得很窄，遇到它表达不了的形式就直接失败）。
 

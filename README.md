@@ -219,16 +219,19 @@ npm run verify               # just the verification scripts
 npm run watch                # rebuild on save, for dsh-client-hmr
 ```
 
-Three checks in three places, each one covering what the one before it cannot:
+Five checks in five places, each one covering what the one before it cannot:
 
 | Check | Runs | Catches |
 | --- | --- | --- |
-| `verify-host.mjs` | Node | A schema whose defaults or ranges drifted from what the browser half assumes |
+| `verify-host.mjs` | Node, stubbed | A schema whose defaults or ranges drifted from what the browser half assumes |
+| `verify-settings.mjs` | Node, real dsh services | The namespace contract the interface depends on: that the real settings service accepts `alert`, that it applies `live`, and — the failure this one exists for — that the value the **host** resolves and the defaults the **browser half** falls back to are the same value. They live in bundles that cannot share a module, so a default changed on one side only would render one setting and enforce another |
 | `verify-client.mjs` | Node, stubbed | Every pure decision: the state precedence, the completion edge, the icon geometry, the title composition, the sound gating, the settings row, and `apply()` end to end against stub services |
 | `browser-check.mjs` | Headless Chrome | The three things a stub cannot judge: whether the browser **decodes** the favicon data URL (an unencoded `#` truncates it into half a fish, with no error anywhere), whether the DOM contract holds (its own `<link>` appended to the head, the app's link left alone, its own element removed), and whether the `MutationObserver` title guard survives the browser's own scheduling |
+| `verify-profile.mjs` | Node, real dsh profile | That the loader actually composes this bundle: the `cordis.patch.yml` row resolves, `dsh.profile.bundles` carries it, and the browser roster can find and serve `lib/client.js` |
 
-The browser check skips cleanly when no Chromium-based browser is installed, so
-it is safe in CI; `DSH_REQUIRE=1` turns that skip into a failure.
+The last two skip cleanly when the thing they need is absent — no Chromium, no
+local dsh — so they are safe in CI; `DSH_REQUIRE=1` turns either skip into a
+failure.
 
 `src/client.js` is the only source of the browser half. It is written as an ES
 module for readability, but a DSH client bundle is a **classic script** that may
