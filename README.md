@@ -34,8 +34,8 @@ that work while the page is in the background:
 | Tab title | A prefix, so the exact counts can be read as text: `① Waiting · My session — DeepSeek Harness` |
 | Sound | A synthesized chime — rising two notes for a question, one note for an approval, a soft low note for a completion |
 
-All three are on by default except the completion chime, and every one of them
-can be switched off on its own.
+All three are on by default — a notice nobody can discover is a notice nobody
+has — and every one of them can be switched off on its own.
 
 ## The state model
 
@@ -100,7 +100,7 @@ Synthesized with Web Audio — no audio files are shipped, and nothing is fetche
 | --- | --- |
 | A question starts waiting | A5 → E6, two overlapping notes (a real musical interval, not two arbitrary beeps) |
 | An approval starts waiting | One A5 note |
-| A session finishes | One soft low note, quieter, and **off by default** |
+| A session finishes | One soft low note, quieter |
 
 Two rules shape when it is allowed to make a sound, and both are switchable:
 
@@ -157,7 +157,7 @@ the channel off strips the prefix instead of leaving it in the tab forever.
 | Sound | On | Master switch for the chime |
 | Chime when a question waits | On | The rising two-note chime |
 | Chime when an approval waits | On | The single note |
-| Chime when a session finishes | **Off** | The soft low note — off because a finished turn is ambient information, and chiming on every one is how people end up muting everything |
+| Chime when a session finishes | On | The soft low note — a finished turn is ambient information, so this is the first switch to turn off if it starts to feel like noise |
 | Only when this page is in the background | On | The foreground-is-silence rule |
 | Volume | 50% | Chime volume, 0–1 |
 | Fish size | 41.6% | How much of the icon the fish takes, 30%–55% |

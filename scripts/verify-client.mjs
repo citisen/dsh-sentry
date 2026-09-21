@@ -466,11 +466,24 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
 
   assert.equal(plugin.soundPlan(ALERTS, { ...settings, sound: false }, BACKGROUND), undefined, 'the master switch is master')
   assert.equal(plugin.soundPlan(ALERTS, { ...settings, soundWaiting: false }, BACKGROUND), 'approvals', 'the question chime can be off on its own')
-  assert.equal(plugin.soundPlan(ALERTS, { ...settings, soundWaiting: false, soundApproval: false }, BACKGROUND), undefined, 'and so can the approval chime')
+  assert.equal(
+    plugin.soundPlan(ALERTS, { ...settings, soundWaiting: false, soundApproval: false }, BACKGROUND),
+    'completed',
+    'with both human-action chimes off, the completion chime is what is left',
+  )
+  assert.equal(
+    plugin.soundPlan(
+      ALERTS,
+      { ...settings, soundWaiting: false, soundApproval: false, soundDone: false },
+      BACKGROUND,
+    ),
+    undefined,
+    'and with every per-event switch off, silence',
+  )
 
   const quiet = { questions: [], approvals: [], completed: ['c'] }
-  assert.equal(plugin.soundPlan(quiet, settings, BACKGROUND), undefined, 'a completion is silent by default')
-  assert.equal(plugin.soundPlan(quiet, { ...settings, soundDone: true }, BACKGROUND), 'completed')
+  assert.equal(plugin.soundPlan(quiet, settings, BACKGROUND), 'completed', 'a completion chimes by default')
+  assert.equal(plugin.soundPlan(quiet, { ...settings, soundDone: false }, BACKGROUND), undefined, 'and can be turned off on its own')
 
   // One sound per burst: three questions in three seconds must not be three chimes.
   assert.equal(
@@ -627,7 +640,7 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
 {
   const defaults = plugin.resolveSettings(undefined)
   assert.equal(defaults.fishScale, 0.416)
-  assert.equal(defaults.soundDone, false, 'a completion chime is opt-in')
+  assert.equal(defaults.soundDone, true, 'every channel is on out of the box')
   assert.equal(defaults.soundBlocked, true, 'the foreground rule is the default')
 
   // Coercion is forgiving on type and strict on range: a typo in settings.yaml
@@ -755,11 +768,17 @@ function rangeInputs(tree) {
   switches[0].props.onClick()
   assert.deepEqual(writes.at(-1), ['favicon', false], 'the switch writes its own field id')
 
-  // The one default that is off must render off, or the row would lie about it.
+  // Every switch must render the resolved default, or the row would lie about it.
+  for (const [index, field] of booleans.entries()) {
+    assert.equal(
+      switches[index].props['aria-checked'],
+      plugin.SETTING_DEFAULTS[field.id],
+      `${field.id} must render its default`,
+    )
+  }
   const doneIndex = booleans.findIndex((field) => field.id === 'soundDone')
-  assert.equal(switches[doneIndex].props['aria-checked'], false)
   switches[doneIndex].props.onClick()
-  assert.deepEqual(writes.at(-1), ['soundDone', true])
+  assert.deepEqual(writes.at(-1), ['soundDone', false], 'a switch toggles away from its default')
 
   // Ranges carry their bounds, so the row cannot offer a value the schema rejects.
   const volume = numbers.findIndex((field) => field.id === 'volume')

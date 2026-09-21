@@ -673,10 +673,12 @@ function noteRunningEdges(prevRunning, list, stamps, now) {
  * the two copies, which turns a silent drift (a switch that writes a key no
  * engine reads) into a failing check.
  *
- * The defaults are the plugin's editorial position: the notifications that mean
- * "a human must act" are on, and the one that means "a thing finished" is off. A
- * completion is ambient information, and a chime for every finished turn in a
- * busy profile is the reason people turn notification sound off entirely.
+ * Every channel defaults to on, on the principle that a feature nobody can
+ * discover is a feature nobody has: each switch is there to get out of the way
+ * once the notice has been noticed, not to gate the plugin behind a setup step.
+ * The completion chime is the easiest one to want off — a finished turn is
+ * ambient information, and chiming on every one is how people end up muting
+ * everything — so its hint says so and it sits last in the sound group.
  */
 const SETTINGS = [
   { id: 'favicon', kind: 'boolean', default: true, labelKey: 'alert.setting.favicon', hintKey: 'alert.setting.faviconHint' },
@@ -684,7 +686,7 @@ const SETTINGS = [
   { id: 'sound', kind: 'boolean', default: true, labelKey: 'alert.setting.sound', hintKey: 'alert.setting.soundHint' },
   { id: 'soundWaiting', kind: 'boolean', default: true, labelKey: 'alert.setting.soundWaiting', hintKey: 'alert.setting.soundWaitingHint' },
   { id: 'soundApproval', kind: 'boolean', default: true, labelKey: 'alert.setting.soundApproval', hintKey: 'alert.setting.soundApprovalHint' },
-  { id: 'soundDone', kind: 'boolean', default: false, labelKey: 'alert.setting.soundDone', hintKey: 'alert.setting.soundDoneHint' },
+  { id: 'soundDone', kind: 'boolean', default: true, labelKey: 'alert.setting.soundDone', hintKey: 'alert.setting.soundDoneHint' },
   { id: 'soundBlocked', kind: 'boolean', default: true, labelKey: 'alert.setting.soundBlocked', hintKey: 'alert.setting.soundBlockedHint' },
   { id: 'volume', kind: 'number', default: 0.5, labelKey: 'alert.setting.volume', hintKey: 'alert.setting.volumeHint' },
   { id: 'fishScale', kind: 'number', default: 0.416, labelKey: 'alert.setting.fishScale', hintKey: 'alert.setting.fishScaleHint' },
@@ -757,7 +759,8 @@ const zh = {
   'alert.setting.soundApproval': '等待审批时提示',
   'alert.setting.soundApprovalHint': '模型请求权限升级时播放一个单音。',
   'alert.setting.soundDone': '会话完成时提示',
-  'alert.setting.soundDoneHint': '默认关闭：会话完成属于背景信息，每轮都响一声会让人关掉整个提示音。',
+  'alert.setting.soundDoneHint':
+    '模型跑完一轮时播放一声很轻的低音。它属于背景信息，如果觉得吵，这里是第一个该关掉的开关。',
   'alert.setting.soundBlocked': '仅在本页不在前台时发声',
   'alert.setting.soundBlockedHint':
     '默认开启。你正看着这个界面时，标签图标和标题已经说明了一切，再响一声就是打扰；关闭后无论如何都会发声。',
@@ -801,7 +804,7 @@ const en = {
   'alert.setting.soundApprovalHint': 'A single note when the model requests a permission escalation.',
   'alert.setting.soundDone': 'Chime when a session finishes',
   'alert.setting.soundDoneHint':
-    'Off by default: a finished turn is ambient information, and chiming on every one is how people end up muting everything.',
+    'A soft low note when a turn finishes. It is ambient information, so if it starts to feel like noise, this is the first switch to turn off.',
   'alert.setting.soundBlocked': 'Only when this page is in the background',
   'alert.setting.soundBlockedHint':
     'On by default. While you are looking at this interface the icon and the title have already said it, and a chime on top of that is an interruption. Turn this off to be chimed at regardless.',

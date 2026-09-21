@@ -95,7 +95,7 @@ assert.deepEqual(defaults, {
   sound: true,
   soundWaiting: true,
   soundApproval: true,
-  soundDone: false,
+  soundDone: true,
   soundBlocked: true,
   volume: 0.5,
   fishScale: 0.416,
