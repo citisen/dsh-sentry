@@ -295,7 +295,7 @@ function planFor(states) {
 }
 
 const IDLE = planFor([])
-const OPTIONS = { fishScale: 0.416, reducedMotion: false }
+const OPTIONS = { reducedMotion: false }
 
 {
   assert.equal(plugin.sentryFavicon(IDLE, OPTIONS), undefined, 'nothing to report draws nothing')
@@ -306,52 +306,74 @@ const OPTIONS = { fishScale: 0.416, reducedMotion: false }
 }
 
 {
-  // The fish is the product's own art, at the requested scale, centered by
-  // construction: the translate must be exactly (32 - 50 * scale) / 2.
+  // The fish is the product's own art, carved out of the disc rather than painted
+  // on it, at full size and centered by construction.
   const svg = plugin.sentryFavicon(planFor(['running']), OPTIONS)
   assert.ok(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">'), 'explicit dimensions are required')
 
-  // The art appears twice — once per color scheme — and both copies are the
-  // shipped path, verbatim. The pair exists because a stylesheet cannot override
-  // a presentation attribute, so the fish and its disc have to swap together.
-  const fishCopies = svg.split(`<path d="${FISH}"`).length - 1
-  assert.equal(fishCopies, 2, 'the shipped fish path, verbatim, in both scheme drawings')
-  assert.ok(svg.includes('fill="#0b0d10"'), 'the light drawing paints a dark fish')
-  assert.ok(svg.includes('fill="#eef0f3"'), 'on a light disc')
-  assert.ok(svg.includes('fill="#ffffff"'), 'the dark drawing paints a light fish')
-  assert.ok(svg.includes('fill="#23262c"'), 'on a dark disc')
+  // The fish is negative space: inside the mask, filled black so the disc is cut
+  // away there, and never painted anywhere else. That is what makes its silhouette
+  // legible against any disc colour and any tab-bar colour.
+  const mask = /<mask id="disc"[^>]*>([\s\S]*?)<\/mask>/.exec(svg)?.[1]
+  assert.ok(mask !== undefined, 'the disc must be mask-carved')
+  assert.ok(mask.includes(`<path d="${FISH}" fill="#000"`), 'the shipped fish path, verbatim, as the carving')
+  assert.equal(svg.split(`<path d="${FISH}"`).length - 1, 1, 'the fish must appear exactly once — as a carving')
+  assert.ok(!/#eef0f3|#23262c|prefers-color-scheme/.test(svg), 'no painted fish and no scheme pair survives')
 
-  // The pair is what makes the glyph legible at all: a dark-mode rule that
-  // changed only one of the two paints a white fish onto a light disc, which is
-  // how the first version of this shipped as "a white circle".
-  const lightFish = /id="fishLight">([\s\S]*?)<\/g>/.exec(svg)?.[1] ?? ''
-  const darkFish = /id="fishDark">([\s\S]*?)<\/g>/.exec(svg)?.[1] ?? ''
-  assert.ok(lightFish.includes('fill="#0b0d10"') && lightFish.includes('fill="#eef0f3"'), 'the light pair swaps together')
-  assert.ok(darkFish.includes('fill="#ffffff"') && darkFish.includes('fill="#23262c"'), 'and so does the dark pair')
+  // Full size means the 50x50 art scaled by 32/50 = 0.64, which is exactly what
+  // "not shrunk any more" means. The first version used 0.416 and the fish became
+  // a ~5px smudge inside a ring nobody could see either.
+  const shift = 16 - 16 * 0.64
   assert.ok(
-    lightFish.includes('fill="#eef0f3"') && darkFish.includes('fill="#ffffff"'),
-    'the fish must never share its fill with the disc it sits on',
+    svg.includes(`translate(${String(shift)} ${String(shift)}) scale(0.64) translate(-16 -16) translate(16 16)`),
+    'centered at full size',
   )
 
-  const offset = (32 - 50 * 0.416) / 2
-  assert.ok(svg.includes(`translate(${String(offset)} ${String(offset)}) scale(0.416)`), `centered at ${String(offset)}`)
-  assert.ok(svg.includes('@media (prefers-color-scheme: dark)'), 'the scheme switch travels with the art')
-  assert.ok(/<circle[^>]*id="fish"/.test(svg) === false, 'the id belongs to the group, not the disc')
-  assert.ok(svg.includes('id="fish"'))
+  // The disc is the canvas: one filled circle, carved by the mask, at the one
+  // radius the geometry is built around.
+  assert.ok(svg.includes(`<circle cx="16" cy="16" r="15.4"`), 'the disc fills the icon')
 
-  // The arcs are painted before the fish so a grown fish is never crossed by a
-  // stroke, and so the disc carries them into its own edge.
-  assert.ok(svg.indexOf('stroke-width="3.6"') < svg.indexOf('id="fish"'), 'arcs under the fish')
+  // The state pattern is carved too, and the running state's is the clock hands:
+  // two bars with a dot on the tip, which is what makes them read as hands rather
+  // than as slots.
+  assert.ok(mask.includes('<rect x="14.7" y="3.4"'), 'the running state carves bar hands')
+  assert.ok(mask.includes('<circle cx="16" cy="4" r="2.7" fill="#000"/>'), 'each hand has a tip')
+  assert.equal(mask.split('<rect x="14.7"').length - 1, 2, 'two bars')
+}
 
-  // A bigger fish is still centered, and still leaves the ring in place. The
-  // offset is rounded to two decimals on the way into the SVG — float noise in a
-  // data URL that is rebuilt on every change is a waste, and `2.2499999999999982`
-  // is exactly what "no rounding" looks like.
-  const big = plugin.sentryFavicon(planFor(['running']), { fishScale: 0.55, reducedMotion: false })
-  const bigOffset = Math.round(((32 - 50 * 0.55) / 2) * 100) / 100
-  assert.equal(bigOffset, 2.25)
-  assert.ok(big.includes(`translate(${String(bigOffset)} ${String(bigOffset)}) scale(0.55)`))
-  assert.ok(big.includes('r="15.4"'), 'the backing disc scales with the fish')
+{
+  // Each state is a composition of primitives, and the composition is the whole
+  // model: a disc colour, a carved pattern, a motion, a rate.
+  const running = plugin.sentryFavicon(planFor(['running']), OPTIONS)
+  assert.ok(running.includes('<animateTransform attributeName="transform" type="rotate"'), 'running turns')
+  assert.ok(running.includes('dur="3s"'), 'at its own rate')
+
+  const waiting = plugin.sentryFavicon(planFor(['waiting']), OPTIONS)
+  assert.ok(waiting.includes('<animate attributeName="opacity"'), 'waiting blinks')
+  assert.ok(waiting.includes('dur="1.1s"'), 'fast')
+
+  const approval = plugin.sentryFavicon(planFor(['approval']), OPTIONS)
+  assert.ok(approval.includes('<animate attributeName="opacity"'), 'an approval blinks too')
+  assert.ok(approval.includes('dur="1.9s"'), 'but slowly — the rate is the only thing telling them apart')
+
+  const done = plugin.sentryFavicon(planFor(['done']), OPTIONS)
+  assert.ok(done.includes('<animate attributeName="fill"'), 'a completion pulses the disc colour')
+  assert.ok(done.includes('fill="#22c55e"'), 'on a green disc')
+
+  // An approval and a question share a colour on purpose: both mean "act", and the
+  // rate is the distinction. If they ever diverge, this catches it.
+  assert.equal(plugin.STATE_LOOK.waiting.disc, plugin.STATE_LOOK.approval.disc)
+  assert.notEqual(plugin.STATE_LOOK.waiting.speed, plugin.STATE_LOOK.approval.speed)
+  assert.equal(plugin.STATE_LOOK.running.pattern, 'hands')
+  assert.equal(plugin.STATE_LOOK.done.disc, '#22c55e')
+
+  // Reduced motion keeps the shape and drops the animation, so the state survives
+  // as a colour even when the motion does not.
+  for (const state of ['running', 'waiting', 'approval', 'done']) {
+    const calm = plugin.sentryFavicon(planFor([state]), { reducedMotion: true })
+    assert.ok(!calm.includes('<animate'), `${state} must not animate under reduced motion`)
+    assert.ok(calm.includes(`fill="${plugin.STATE_LOOK[state].disc}"`), `${state} keeps its disc colour`)
+  }
 }
 
 {
@@ -363,68 +385,60 @@ const OPTIONS = { fishScale: 0.416, reducedMotion: false }
   assert.ok(plugin.sentryFavicon(planFor(['waiting', 'waiting', 'waiting']), OPTIONS).includes('>3</text>'))
   const many = plugin.sentryFavicon(planFor(['waiting', 'waiting', 'waiting', 'waiting']), OPTIONS)
   assert.ok(!many.includes('<text'), 'four and up is a smudge, so no digit')
-  assert.ok(many.includes('stroke="#f59e0b"'), 'but the ring still says someone is waiting')
+  assert.ok(many.includes('<circle cx="16" cy="16" r="15.4" fill="#f59e0b"'), 'but the disc still says someone is waiting')
 
-  // Approvals count toward the blocked arc but never toward the digit: the
-  // digit is the question count, and an approval is a different act.
+  // The badge is painted rather than carved, and wears a dark keyline so it stays
+  // readable on a tab bar of any colour — it is the one mark that must not depend
+  // on what is behind it.
+  assert.ok(one.includes('stroke="#0b0d10"'), 'the badge is ringed, not carved')
+
+  // Approvals never produce a digit: the digit is the question count, and an
+  // approval is a different act.
   const approval = plugin.sentryFavicon(planFor(['approval']), OPTIONS)
   assert.ok(!approval.includes('<text'), 'an approval is not a question count')
-  assert.ok(approval.includes('stroke="#f59e0b"'))
+  assert.ok(approval.includes('fill="#f59e0b"'), 'but it wears the same disc colour as a question')
 }
 
 {
-  // Motion is SMIL and only where it means something: waiting breathes, running
-  // rotates, a completed session is silent, and reduced motion removes it all.
+  // Motion is SMIL and only where it means something, and each state's motion is
+  // its own: a disc that blinks for two different reasons has to be told apart by
+  // rate, because an icon this small has no room for a glyph.
   const waiting = plugin.sentryFavicon(planFor(['waiting']), OPTIONS)
-  assert.ok(waiting.includes('<animate attributeName="opacity"'), 'waiting breathes')
-  assert.ok(!waiting.includes('animateTransform'))
+  assert.ok(waiting.includes('<animate attributeName="opacity"'), 'waiting blinks')
+  assert.ok(!waiting.includes('animateTransform'), 'and does not turn')
 
   const running = plugin.sentryFavicon(planFor(['running']), OPTIONS)
-  assert.ok(running.includes('<animateTransform attributeName="transform" type="rotate"'), 'running rotates')
-  assert.ok(running.includes('values="0 16 16;45 16 16;'), 'eight discrete steps, not a sweep')
-  assert.ok(!running.includes('<animate attributeName="opacity"' + ''))
+  assert.ok(running.includes('<animateTransform attributeName="transform" type="rotate"'), 'running turns')
+  assert.ok(running.includes('values="0 16 16;360 16 16"'), 'a full turn per period')
+  assert.ok(!running.includes('<animate attributeName="opacity"'), 'and does not blink')
 
   const done = plugin.sentryFavicon(planFor(['done']), OPTIONS)
-  assert.ok(!done.includes('<animate'), 'a completion does not animate')
+  assert.ok(done.includes('<animate attributeName="fill"'), 'a completion pulses the disc colour')
   assert.ok(
-    done.includes('<circle cx="16" cy="16" r="12.5" fill="none" stroke="#22c55e"'),
-    'and the ring track is green',
+    done.includes('<circle cx="16" cy="16" r="15.4" fill="#22c55e"'),
+    'and the disc is green',
   )
 
-  // The track tracks the quiet half of the status; the arcs carry the loud half.
-  const busy = plugin.sentryFavicon(planFor(['running']), OPTIONS)
-  assert.ok(busy.includes('<circle cx="16" cy="16" r="12.5" fill="none" stroke="#4d6bfe"'), 'running is blue')
+  // A question outranks a busy tab: one icon shows one colour, and the most urgent
+  // fact is the one worth the whole disc.
   const blocked = plugin.sentryFavicon(planFor(['waiting', 'running']), OPTIONS)
   assert.ok(
-    blocked.includes('<circle cx="16" cy="16" r="12.5" fill="none" stroke="#f59e0b"'),
-    'a question outranks the busy color',
+    blocked.includes('<circle cx="16" cy="16" r="15.4" fill="#f59e0b"'),
+    'a question wins the disc',
   )
+  assert.ok(blocked.includes('dur="1.1s"'), 'with the question\u2019s own rate')
 
-  const calm = plugin.sentryFavicon(planFor(['waiting', 'running']), { fishScale: 0.416, reducedMotion: true })
-  assert.ok(!calm.includes('<animate'), 'reduced motion removes the animation entirely')
-  assert.ok(calm.includes('stroke-opacity="1"'), 'and raises the arcs to full opacity instead')
-  assert.ok(calm.includes('stroke="#f59e0b"') && calm.includes('stroke="#4d6bfe"'), 'both arcs survive')
-
-  // The two state classes live on opposite halves, which is what lets one icon
-  // carry "two working, one waiting" without a legend.
-  const both = plugin.sentryFavicon(planFor(['waiting', 'running']), OPTIONS)
-  /** The arc rotation carrying a state's color. @param color - the stroke color. */
-  const rotationFor = (color) => {
-    for (const match of both.matchAll(/<circle\b[^>]*>/g)) {
-      // The arcs are the 3.6-wide circles: the track is the same radius and can
-      // carry the same color, so width is what tells them apart.
-      if (match[0].includes(`stroke="${color}"`) && match[0].includes('stroke-width="3.6"')) {
-        const rotation = /transform="rotate\(([-\d.]+)/.exec(match[0])
-        return rotation === null ? undefined : Number(rotation[1])
-      }
-    }
-    return undefined
+  // Reduced motion keeps the shape and drops the animation, so the state survives
+  // as a colour even when the motion does not.
+  for (const state of ['running', 'waiting', 'approval', 'done']) {
+    const calm = plugin.sentryFavicon(planFor([state]), { reducedMotion: true })
+    assert.ok(!calm.includes('<animate'), `${state} must not animate under reduced motion`)
+    assert.ok(
+      calm.includes(`<circle cx="16" cy="16" r="15.4" fill="${plugin.STATE_LOOK[state].disc}"`),
+      `${state} keeps its disc colour`,
+    )
+    assert.ok(calm.includes('<path'), `${state} keeps the carved fish`)
   }
-  const left = rotationFor('#f59e0b')
-  const right = rotationFor('#4d6bfe')
-  assert.ok(left !== undefined && right !== undefined, 'both arcs must be drawn')
-  assert.ok(left > 90 && left < 270, `the blocked arc is on the left (${String(left)})`)
-  assert.ok(right <= 0 || right >= 270, `the running arc is on the right (${String(right)})`)
 }
 
 {
@@ -664,15 +678,12 @@ const FOREGROUND = { now: 10_000, lastSoundAt: undefined, hidden: false, focused
 // ── the settings ────────────────────────────────────────────────────────────
 {
   const defaults = plugin.resolveSettings(undefined)
-  assert.equal(defaults.fishScale, 0.416)
   assert.equal(defaults.soundDone, true, 'every channel is on out of the box')
   assert.equal(defaults.soundBlocked, true, 'the foreground rule is the default')
+  assert.equal('fishScale' in defaults, false, 'the fish is full size now; there is no size to set')
 
   // Coercion is forgiving on type and strict on range: a typo in settings.yaml
-  // should shrink the fish, not disable the favicon.
-  assert.equal(plugin.resolveSettings({ fishScale: '0.5' }).fishScale, 0.5)
-  assert.equal(plugin.resolveSettings({ fishScale: 3 }).fishScale, 0.55)
-  assert.equal(plugin.resolveSettings({ fishScale: 0.1 }).fishScale, 0.3)
+  // should shrink the volume, not disable the chime.
   assert.equal(plugin.resolveSettings({ volume: 4 }).volume, 1)
   assert.equal(plugin.resolveSettings({ volume: -1 }).volume, 0)
   assert.equal(plugin.resolveSettings({ doneWindowMs: -5 }).doneWindowMs, 0)
@@ -812,9 +823,9 @@ function rangeInputs(tree) {
   assert.equal(ranges[volume].props.value, 0.5)
   ranges[volume].props.onChange({ target: { value: '0.75' } })
   assert.deepEqual(writes.at(-1), ['volume', 0.75])
-  const fish = numbers.findIndex((field) => field.id === 'fishScale')
-  assert.equal(ranges[fish].props.min, 0.3)
-  assert.equal(ranges[fish].props.max, 0.55)
+  const window_ = numbers.findIndex((field) => field.id === 'doneWindowMs')
+  assert.equal(ranges[window_].props.min, 0)
+  assert.equal(ranges[window_].props.max, 300_000)
 
   const preview = collectElements(tree).find((element) => element.props?.className === 'dsh-sentry-preview')
   assert.ok(preview !== undefined, 'the row must offer a preview')
@@ -1172,5 +1183,6 @@ delete globalThis.window
 
 console.log('verify-client: OK — envelope, fish, session model, favicon, title, chime, settings row and engine verified')
 console.log(`verify-client: factory required ${requested.join(', ')}`)
+
 
 

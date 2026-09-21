@@ -45,6 +45,9 @@ const ENVELOPE_EXPORTS = [
   'SETTING_DEFAULTS',
   'STATES',
   'STATE_COLORS',
+  'STATE_LOOK',
+  'PATTERN_SHAPES',
+  'MOTIONS',
   'CHIME_NOTES',
   'FISH_PATH',
   'SOUND_GAP_MS',
@@ -375,3 +378,4 @@ if (process.argv.includes('--check')) {
 } else {
   build()
 }
+

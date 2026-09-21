@@ -78,10 +78,11 @@ const page = `<!doctype html>
 <script>
   const plugin = window.__PLUGIN__
   const scenarios = [
-    { label: 'running', waiting: 0, running: 1, scale: 0.416 },
-    { label: 'waiting + 2 running', waiting: 1, running: 2, scale: 0.416 },
-    { label: 'waiting, biggest fish', waiting: 1, running: 0, scale: 0.55 },
-    { label: 'just finished', waiting: 0, running: 0, done: 1, scale: 0.416 },
+    { label: 'running', waiting: 0, running: 1, disc: 'blue', carved: true },
+    { label: 'waiting', waiting: 1, running: 0, disc: 'amber', carved: true, digit: 1 },
+    { label: 'approval', waiting: 0, approval: 1, running: 0, disc: 'amber', carved: true },
+    { label: 'just finished', waiting: 0, running: 0, done: 1, disc: 'green', carved: true },
+    { label: 'question outranks a busy tab', waiting: 1, running: 2, disc: 'amber', carved: true, digit: 1 },
   ]
   const sample = (svg) => new Promise((resolve) => {
     const image = new Image()
@@ -97,6 +98,7 @@ const page = `<!doctype html>
         if (r > 200 && g > 200 && b > 200) return 'W'
         if (r < 60 && g < 60 && b < 60) return 'K'
         if (b > r + 40 && b > 120) return 'B'
+        if (g > 120 && r < 130 && b < 130) return 'G'
         if (r > 180 && g > 120 && b < 120) return 'A'
         return '?'
       }
@@ -107,9 +109,15 @@ const page = `<!doctype html>
         map.push(row)
       }
       const flat = map.join('')
+      const count = (ch) => flat.split(ch).length - 1
       resolve({
-        center: at(32, 32), inner: at(32, 22), ring: at(32, 7), corner: at(6, 6),
-        counts: { dark: (flat.match(/K/g) ?? []).length, light: (flat.match(/W/g) ?? []).length, blue: (flat.match(/B/g) ?? []).length, amber: (flat.match(/A/g) ?? []).length },
+        // The centre of the canvas is inside the fish's body, which is carved out —
+        // so it must be transparent, not a disc colour.
+        center: at(32, 32),
+        // A point on the disc away from the fish and away from the badge.
+        discSample: at(32, 8),
+        small: null,
+        counts: { transparent: count('.'), white: count('W'), dark: count('K'), blue: count('B'), amber: count('A'), green: count('G') },
         map,
       })
     }
@@ -121,12 +129,12 @@ const page = `<!doctype html>
     for (const scenario of scenarios) {
       const plan = {
         bySession: new Map(),
-        active: new Array(scenario.waiting + scenario.running + (scenario.done ?? 0)).fill('x'),
+        active: new Array(scenario.waiting + (scenario.approval ?? 0) + scenario.running + (scenario.done ?? 0)).fill('x'),
         finished: scenario.done ? ['a'] : [],
-        waiting: scenario.waiting, approval: 0, running: scenario.running, done: scenario.done ?? 0,
+        waiting: scenario.waiting, approval: scenario.approval ?? 0, running: scenario.running, done: scenario.done ?? 0,
       }
-      const svg = plugin.sentryFavicon(plan, { fishScale: scenario.scale, reducedMotion: false })
-      out.push({ label: scenario.label, ...(await sample(svg)) })
+      const svg = plugin.sentryFavicon(plan, { reducedMotion: false })
+      out.push({ label: scenario.label, ...scenario, ...(await sample(svg)) })
     }
     return out
   }
@@ -196,6 +204,8 @@ try {
   const evaluate = async (expression) =>
     (await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result.value
 
+  const expectedDisc = { blue: 'blue', amber: 'amber', green: 'green' }
+
   for (const scheme of ['light', 'dark']) {
     await send('Emulation.setEmulatedMedia', {
       features: [{ name: 'prefers-color-scheme', value: scheme }],
@@ -209,31 +219,42 @@ try {
         failures += 1
         continue
       }
+      const { counts } = result
       console.log(
-        `  ${result.label}: center=${JSON.stringify(result.center)} inner=${JSON.stringify(result.inner)} ` +
-          `ring=${JSON.stringify(result.ring)} dark_px=${String(result.counts.dark)} light_px=${String(result.counts.light)} ` +
-          `blue_px=${String(result.counts.blue)} amber_px=${String(result.counts.amber)}`,
+        `  ${result.label}: disc=${JSON.stringify(result.discSample)} center=${JSON.stringify(result.center)} ` +
+          `carved_px=${String(counts.transparent)} blue=${String(counts.blue)} amber=${String(counts.amber)} green=${String(counts.green)}`,
       )
       for (const row of result.map) console.log(`      ${row}`)
 
-      // The fish must be visible: the glyph is far more than a fifth of the icon's
-      // pixels, and it must be painted in the opposite luminance class from its own
-      // disc. A missing fish, or a fish the same colour as the disc, both fail here.
-      const fishPixels = result.counts.dark + result.counts.light
-      if (fishPixels < 60) {
-        console.log(`      FAIL: only ${String(fishPixels)} fish/disc-classified pixels — the glyph is missing`)
+      // The disc colour is the state. One icon, one disc, and the state the user
+      // most needs to see is the one that gets it.
+      const discClass = expectedDisc[result.disc]
+      if (counts[discClass] < 200) {
+        console.log(`      FAIL: expected a ${discClass} disc, found ${String(counts[discClass])} such pixels`)
         failures += 1
       }
-      const [r, g, b] = result.center
-      const centerIsDark = r < 100 && g < 100 && b < 100
-      const centerIsLight = r > 200 && g > 200 && b > 200
-      const darkScheme = scheme === 'dark'
-      if (darkScheme && !centerIsLight) {
-        console.log(`      FAIL: in dark mode the fish center should be light, got ${JSON.stringify(result.center)}`)
+
+      // The fish is carved, so the middle of the canvas — inside the fish's body —
+      // has to be transparent rather than any disc colour. That is the property
+      // that keeps the silhouette legible on a tab bar of any colour, and it is
+      // also what a mask that silently failed to apply would break.
+      const [cr, cg, cb, ca] = result.center
+      if (ca > 40) {
+        console.log(
+          `      FAIL: the fish's body should be carved out (transparent), got ${JSON.stringify(result.center)}`,
+        )
         failures += 1
       }
-      if (!darkScheme && !centerIsDark) {
-        console.log(`      FAIL: in light mode the fish center should be dark, got ${JSON.stringify(result.center)}`)
+
+      // The badge is the one painted mark, and only a question earns a digit.
+      const wantsDigit = result.digit !== undefined
+      const hasDigit = counts.dark > 0
+      if (wantsDigit && !hasDigit) {
+        console.log('      FAIL: a waiting session should show a painted badge')
+        failures += 1
+      }
+      if (!wantsDigit && hasDigit) {
+        console.log('      FAIL: only a question count may be painted on the disc')
         failures += 1
       }
     }
@@ -242,12 +263,21 @@ try {
   socket.close()
   console.log(
     failures === 0
-      ? 'icon-render-check: OK — the fish is painted, with the opposite luminance of its disc, in both color schemes'
+      ? 'icon-render-check: OK — the disc carries the state colour and the fish is carved through it, in both color schemes'
       : `icon-render-check: ${String(failures)} problem(s)`,
   )
 } finally {
   child.kill()
-  rmSync(scope, { recursive: true, force: true })
+  // The browser's own profile files stay locked for a moment after the process is
+  // signalled; a scratch directory that outlives the run is not worth a failure.
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  try {
+    rmSync(scope, { recursive: true, force: true })
+  } catch {
+    /* left for the OS to reap */
+  }
 }
 
 process.exit(failures === 0 ? 0 : 1)
+
+

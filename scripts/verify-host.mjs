@@ -62,8 +62,6 @@ const {
   ALERT_NAMESPACE,
   ALERT_FIELDS,
   AlertSchema,
-  FISH_SCALE_MAX,
-  FISH_SCALE_MIN,
   DONE_WINDOW_MAX,
   DONE_WINDOW_MIN,
   apply,
@@ -82,7 +80,6 @@ assert.deepEqual(ALERT_FIELDS, [
   'soundDone',
   'soundBlocked',
   'volume',
-  'fishScale',
   'doneWindowMs',
 ])
 
@@ -98,15 +95,12 @@ assert.deepEqual(defaults, {
   soundDone: true,
   soundBlocked: true,
   volume: 0.5,
-  fishScale: 0.416,
   doneWindowMs: 60_000,
 })
 
 // A switch value is a boolean at the wire boundary; anything else is a bug in
 // the row rather than a preference to store.
 assert.equal(AlertSchema({ favicon: false }).favicon, false)
-assert.equal(AlertSchema({ fishScale: FISH_SCALE_MIN }).fishScale, FISH_SCALE_MIN)
-assert.equal(AlertSchema({ fishScale: FISH_SCALE_MAX }).fishScale, FISH_SCALE_MAX)
 assert.equal(AlertSchema({ volume: 0 }).volume, 0)
 assert.equal(AlertSchema({ doneWindowMs: DONE_WINDOW_MIN }).doneWindowMs, DONE_WINDOW_MIN)
 assert.equal(AlertSchema({ doneWindowMs: DONE_WINDOW_MAX }).doneWindowMs, DONE_WINDOW_MAX)
@@ -114,8 +108,6 @@ assert.throws(() => AlertSchema({ favicon: 'off' }))
 assert.throws(() => AlertSchema({ favicon: 1 }))
 // The ranges are the schema's job because the settings document is editable by
 // hand: a 3x fish must not reach the engine even if the row is bypassed.
-assert.throws(() => AlertSchema({ fishScale: 3 }), 'an out-of-range fish must be rejected')
-assert.throws(() => AlertSchema({ fishScale: 0.1 }))
 assert.throws(() => AlertSchema({ volume: 4 }))
 assert.throws(() => AlertSchema({ volume: -1 }))
 assert.throws(() => AlertSchema({ doneWindowMs: -1 }))
@@ -152,3 +144,4 @@ assert.ok(registered[0].schema !== undefined)
 apply({ inject: () => undefined, get: () => undefined })
 
 console.log('verify-host: OK — namespace registered, defaults and ranges verified')
+

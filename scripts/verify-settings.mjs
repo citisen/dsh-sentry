@@ -225,9 +225,9 @@ assert.deepEqual(hostDefaults, client.SETTING_DEFAULTS, 'and equal to the shippe
 assert.equal(hostDefaults.soundDone, true, 'every channel is on out of the box')
 
 // A write goes through the real validation and commit path.
-await provider.update(ALERT_NAMESPACE, { fishScale: 0.5, sound: false })
+await provider.update(ALERT_NAMESPACE, { volume: 0.8, sound: false })
 const afterWrite = provider.get(ALERT_NAMESPACE)
-assert.equal(afterWrite.fishScale, 0.5)
+assert.equal(afterWrite.volume, 0.8)
 assert.equal(afterWrite.sound, false)
 assert.equal(afterWrite.title, true, 'an unpatched field keeps its default')
 assert.ok(
@@ -238,12 +238,12 @@ assert.ok(
 // The schema is the guard rail: the Settings row cannot offer a value the schema
 // rejects, and a hand-edited document cannot smuggle one past registration.
 await assert.rejects(
-  () => provider.update(ALERT_NAMESPACE, { fishScale: 3 }),
-  'an out-of-range fish must be refused by the real service',
+  () => provider.update(ALERT_NAMESPACE, { volume: 3 }),
+  'an out-of-range volume must be refused by the real service',
 )
 await assert.rejects(() => provider.update(ALERT_NAMESPACE, { volume: -1 }))
 await assert.rejects(() => provider.update(ALERT_NAMESPACE, { favicon: 'off' }))
-assert.equal(provider.get(ALERT_NAMESPACE).fishScale, 0.5, 'a refused write must not commit')
+assert.equal(provider.get(ALERT_NAMESPACE).volume, 0.8, 'a refused write must not commit')
 
 // A reset re-inherits every default, which is what the row's reset button is for.
 await provider.replace(ALERT_NAMESPACE, {})
@@ -252,7 +252,7 @@ assert.deepEqual(provider.get(ALERT_NAMESPACE), hostDefaults, 'replace({}) must 
 // ── a stored document is validated at registration, not trusted ─────────────
 {
   const bad = new Context()
-  const badProvider = new MemorySettings(bad, { alert: { fishScale: 3 } })
+  const badProvider = new MemorySettings(bad, { alert: { volume: 3 } })
   await initialise(badProvider)
   let threw = false
   const badWarnings = []
@@ -281,5 +281,6 @@ if (warnings.length > 0) {
 
 console.log('verify-settings: OK — the real settings service accepted the namespace')
 console.log(
-  `verify-settings: resolved defaults match the browser half (favicon=${String(hostDefaults.favicon)}, soundDone=${String(hostDefaults.soundDone)}, fishScale=${String(hostDefaults.fishScale)})`,
+  `verify-settings: resolved defaults match the browser half (favicon=${String(hostDefaults.favicon)}, soundDone=${String(hostDefaults.soundDone)}, volume=${String(hostDefaults.volume)})`,
 )
+

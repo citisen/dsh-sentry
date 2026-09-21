@@ -240,9 +240,21 @@ const CHECKLIST = `
 
         const svgUrl = icon.href
         check(svgUrl.startsWith('data:image/svg+xml'), 'unexpected icon href ' + svgUrl.slice(0, 40))
-        const decoded = decodeURIComponent(svgUrl.slice(svgUrl.indexOf(',') + 1))
+        // Split on the media type's own comma. A plain indexOf of a comma would
+        // land inside image/svg+xml;charset=utf-8, which decodes to something that
+        // is not the SVG at all — a trap this check fell into once already.
+        // Anchor on the payload's own opening tag rather than counting characters
+        // through the media type: the header contains a comma of its own, and
+        // offset arithmetic against it is a bug waiting to happen.
+        const decoded = decodeURIComponent(svgUrl.slice(svgUrl.indexOf('%3Csvg')))
+        check(decoded.startsWith('<svg'), 'the data URL must decode to the icon itself; href began ' + svgUrl.slice(0, 60) + ' and decoded to ' + decoded.slice(0, 60))
         check(decoded.includes('width="32"') && decoded.includes('height="32"'), 'the SVG must carry explicit dimensions')
-        check(decoded.includes('id="fish"'), 'the fish group must be present')
+        check(decoded.includes('<mask id="disc"'), 'the disc must be mask-carved')
+        // This scenario is a running session with a pending question, and a question
+        // outranks a busy tab: one icon carries one disc colour, and the most urgent
+        // fact is the one worth it. Per-state colours belong to the icon render
+        // check; what matters here is that the browser paints the disc at all.
+        check(decoded.indexOf('fill="#f59e0b"') >= 0, 'the disc must be painted in the state colour')
 
         const rendered = await new Promise((resolve) => {
           const probe = new Image()
@@ -342,3 +354,6 @@ try {
 } finally {
   rmSync(scope, { recursive: true, force: true })
 }
+
+
+
