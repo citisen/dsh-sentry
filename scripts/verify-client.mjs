@@ -310,13 +310,38 @@ const OPTIONS = { fishScale: 0.416, reducedMotion: false }
   // construction: the translate must be exactly (32 - 50 * scale) / 2.
   const svg = plugin.sentryFavicon(planFor(['running']), OPTIONS)
   assert.ok(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">'), 'explicit dimensions are required')
-  assert.ok(svg.includes(`<path d="${FISH}" fill="#000" fill-rule="nonzero"/>`), 'the shipped fish path, verbatim')
+
+  // The art appears twice — once per color scheme — and both copies are the
+  // shipped path, verbatim. The pair exists because a stylesheet cannot override
+  // a presentation attribute, so the fish and its disc have to swap together.
+  const fishCopies = svg.split(`<path d="${FISH}"`).length - 1
+  assert.equal(fishCopies, 2, 'the shipped fish path, verbatim, in both scheme drawings')
+  assert.ok(svg.includes('fill="#0b0d10"'), 'the light drawing paints a dark fish')
+  assert.ok(svg.includes('fill="#eef0f3"'), 'on a light disc')
+  assert.ok(svg.includes('fill="#ffffff"'), 'the dark drawing paints a light fish')
+  assert.ok(svg.includes('fill="#23262c"'), 'on a dark disc')
+
+  // The pair is what makes the glyph legible at all: a dark-mode rule that
+  // changed only one of the two paints a white fish onto a light disc, which is
+  // how the first version of this shipped as "a white circle".
+  const lightFish = /id="fishLight">([\s\S]*?)<\/g>/.exec(svg)?.[1] ?? ''
+  const darkFish = /id="fishDark">([\s\S]*?)<\/g>/.exec(svg)?.[1] ?? ''
+  assert.ok(lightFish.includes('fill="#0b0d10"') && lightFish.includes('fill="#eef0f3"'), 'the light pair swaps together')
+  assert.ok(darkFish.includes('fill="#ffffff"') && darkFish.includes('fill="#23262c"'), 'and so does the dark pair')
+  assert.ok(
+    lightFish.includes('fill="#eef0f3"') && darkFish.includes('fill="#ffffff"'),
+    'the fish must never share its fill with the disc it sits on',
+  )
+
   const offset = (32 - 50 * 0.416) / 2
   assert.ok(svg.includes(`translate(${String(offset)} ${String(offset)}) scale(0.416)`), `centered at ${String(offset)}`)
-  assert.ok(svg.includes('@media (prefers-color-scheme: dark){#fish path{fill:#fff}}'), 'the dark-tab inversion travels with the art')
-  assert.ok(svg.includes('fill="#f4f5f7"'), 'the backing disc keeps the fish visible on a same-colored tab bar')
+  assert.ok(svg.includes('@media (prefers-color-scheme: dark)'), 'the scheme switch travels with the art')
   assert.ok(/<circle[^>]*id="fish"/.test(svg) === false, 'the id belongs to the group, not the disc')
   assert.ok(svg.includes('id="fish"'))
+
+  // The arcs are painted before the fish so a grown fish is never crossed by a
+  // stroke, and so the disc carries them into its own edge.
+  assert.ok(svg.indexOf('stroke-width="3.6"') < svg.indexOf('id="fish"'), 'arcs under the fish')
 
   // A bigger fish is still centered, and still leaves the ring in place. The
   // offset is rounded to two decimals on the way into the SVG — float noise in a
@@ -326,7 +351,7 @@ const OPTIONS = { fishScale: 0.416, reducedMotion: false }
   const bigOffset = Math.round(((32 - 50 * 0.55) / 2) * 100) / 100
   assert.equal(bigOffset, 2.25)
   assert.ok(big.includes(`translate(${String(bigOffset)} ${String(bigOffset)}) scale(0.55)`))
-  assert.ok(big.includes('r="16.23"'), 'the backing disc scales with the fish')
+  assert.ok(big.includes('r="15.4"'), 'the backing disc scales with the fish')
 }
 
 {

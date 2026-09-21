@@ -243,25 +243,48 @@ function round2(value) {
 }
 
 /**
+ * The disc the fish sits on, per browser color-scheme, and the fish's own fill.
+ *
+ * These are one decision, not two. The fish is made legible against the *disc*
+ * rather than against the tab bar, because the tab bar's color is not something
+ * this plugin can know: it follows the browser's own chrome theme, which is
+ * independent of the page. So the disc always provides the contrast and the fish
+ * always contrasts with the disc — a dark fish on a light disc in a light
+ * browser, a light fish on a dark disc in a dark one.
+ *
+ * The pair must move together. A `prefers-color-scheme: dark` rule that changed
+ * one without the other paints a white fish onto a light disc: an invisible
+ * glyph, which reads as "a white circle" rather than as an error. That is exactly
+ * how the first version of this shipped.
+ */
+const FISH_PALETTE = {
+  light: { disc: '#eef0f3', fish: '#0b0d10' },
+  dark: { disc: '#23262c', fish: '#ffffff' },
+}
+
+/**
  * The ring-and-fish favicon, as an SVG string.
  *
- * The composition, outside in:
+ * The composition, inside out:
  *
- * 1. A neutral ring track at `r=12.5`, always drawn, so the icon keeps its shape
- *    when only the color changes — a ring that appears and disappears is a
- *    flicker, a ring that recolors is a status.
- * 2. A backing disc under the fish. The fish is drawn in the product's own
- *    black/white pair, which vanishes against a tab bar of the same color; the
- *    disc gives it a surface everywhere.
- * 3. The fish itself, scaled and centered by `fishScale`. At the default 0.416
- *    the 50×50 art lands at 20.8px in the 32px canvas. The settings row can grow
- *    it, because "how big should the fish be" is a matter of taste and eyesight,
- *    not of information design.
- * 4. Two arcs on the ring: the blocked-on-human count on the left half, the
- *    running count on the right. Being on opposite halves is what lets one tiny
- *    icon carry "two are working, one is waiting for me" without a legend.
- * 5. A corner badge with the waiting count, because "someone is waiting" is the
- *    one fact worth an exact number.
+ * 1. The fish, straight from the shipped favicon's own path data. It is the
+ *    identity of the tab and is never redrawn; at the default 0.416 the 50×50 art
+ *    lands at 20.8px in the 32px canvas.
+ * 2. A backing disc, so the fish keeps the same contrast whatever the tab bar is
+ *    doing (see {@link FISH_PALETTE}).
+ * 3. Two arcs: the blocked-on-human count on the left half, the running count on
+ *    the right. Being on opposite halves is what lets one tiny icon carry "two are
+ *    working, one is waiting for me" without a legend.
+ * 4. A ring track under them, which is what lets the icon keep its shape when only
+ *    the color changes.
+ * 5. A corner badge with the waiting count, because "someone is waiting" is the one
+ *    fact worth an exact number.
+ *
+ * The paint order is arcs → disc → fish, not disc → fish → arcs. The disc sits
+ * *over* the arcs so a grown fish is never crossed by a stroke, and so the arcs
+ * read as running into the disc's edge instead of stopping short of it. At the
+ * default scale the fish sits inside the disc, so nothing covers an arc until the
+ * user asks for a bigger fish.
  *
  * Motion is SMIL and nothing else. In the favicon replacement document a CSS
  * `transform` has no reliable origin, so a CSS-animated variant renders as a
@@ -278,17 +301,16 @@ function sentryFavicon(plan, options) {
   if (!planHasSignal(plan)) return undefined
   const { fishScale, reducedMotion } = options
 
-  // The ring: an always-present track plus one arc per occupied state class. Each
-  // arc is placed by rotating its own dash start to where it belongs, so neither
-  // arc needs a dash-offset — a dashoffset's sign convention is the classic place
-  // to get an arc mirrored by accident.
+  // Each arc is placed by rotating its own dash start to where it belongs, so
+  // neither needs a dash-offset — a dashoffset's sign convention is the classic
+  // place to get an arc mirrored by accident.
   const blocked = plan.waiting + plan.approval
   const circumference = 2 * Math.PI * 12.5
   const dash = (n) => Math.min(n, 3) * 0.13 * circumference
 
-  /** @param color - stroke color. @param rotation - where to place the arc, in degrees. */
-  const arcPath = (color, rotation) =>
-    `<circle cx="16" cy="16" r="12.5" fill="none" stroke="${color}" stroke-width="3.6"` +
+  /** @param strokeColor - stroke color. @param rotation - where to place the arc, in degrees. */
+  const arcPath = (strokeColor, rotation) =>
+    `<circle cx="16" cy="16" r="12.5" fill="none" stroke="${strokeColor}" stroke-width="3.6"` +
     ` stroke-linecap="round" transform="rotate(${rotation} 16 16)"/>`
 
   const arcs = []
@@ -313,42 +335,50 @@ function sentryFavicon(plan, options) {
             ` keyTimes="0;.125;.25;.375;.5;.625;.75;.875;1" dur="1.4s" repeatCount="indefinite"/>`),
     )
   }
-  // With motion suppressed the arcs stay fully opaque, so a reduced-motion user
-  // reads exactly the same counts without the pulse.
-  const arcOpacity = reducedMotion ? ' stroke-opacity="1"' : ' stroke-opacity=".95"'
 
-  // The fish: the shipped art, centered by construction rather than by fiddling
-  // with a margin — the translate puts the art's own 50-unit center on the canvas
-  // center for any scale.
+  // The track says the *quiet* half of the status: amber when someone is waiting,
+  // blue when the tab is merely busy, green when the freshest thing that happened
+  // is a completion. It recolors rather than appearing and disappearing, because a
+  // ring that flickers reads as a glitch and a ring that changes color reads as a
+  // status.
+  const track = blocked > 0 ? STATE_COLORS.waiting : plan.running > 0 ? STATE_COLORS.running : STATE_COLORS.done
+
+  // The fish is centered by construction rather than by fiddling with a margin:
+  // the translate puts the art's own 50-unit center on the canvas center for any
+  // scale, so the size slider cannot drift it off center.
   const size = 50 * fishScale
   const offset = round2((32 - size) / 2)
-  const disc = `<circle cx="16" cy="16" r="${round2((size / 2) * 1.18)}" fill="#f4f5f7"/>`
-  const fish =
-    `<g transform="translate(${offset} ${offset}) scale(${fishScale})" id="fish">` +
-    `<path d="${FISH_PATH}" fill="#000" fill-rule="nonzero"/></g>`
+  const discRadius = round2((size / 2) * 1.12)
 
-  // The badge: only where a digit is unambiguous. At four and up the ring already
-  // says "several", and a two-character badge at 16px is a smudge.
+  // The badge carries an exact count only where a digit is unambiguous: at four
+  // and up the ring already says "several", and a two-character badge at 16px is a
+  // smudge.
   const badge =
     plan.waiting >= 1 && plan.waiting <= 3
       ? `<circle cx="27" cy="5" r="5.6" fill="${STATE_COLORS.waiting}"/>` +
         `<text x="27" y="8.1" font-size="9.5" font-weight="700" text-anchor="middle" fill="#111">${plan.waiting}</text>`
       : ''
 
-  // The track says the *quiet* half of the status: green when the freshest thing
-  // that happened is a completion, blue when the tab is merely busy, amber when
-  // someone is waiting. It recolors rather than appearing and disappearing,
-  // because a ring that flickers reads as a glitch and a ring that changes color
-  // reads as a status.
-  const trackColor = blocked > 0 ? STATE_COLORS.waiting : plan.running > 0 ? STATE_COLORS.running : STATE_COLORS.done
+  /** One complete fish-and-disc drawing for a palette. @param palette - the scheme's pair. */
+  const drawing = (palette) =>
+    `<circle cx="16" cy="16" r="${String(discRadius)}" fill="${palette.disc}"/>` +
+    `<path d="${FISH_PATH}" fill="${palette.fish}" fill-rule="nonzero"/>`
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">` +
-    `<style>@media (prefers-color-scheme: dark){#fish path{fill:#fff}}</style>` +
-    `<circle cx="16" cy="16" r="12.5" fill="none" stroke="${trackColor}" stroke-width="2.6" stroke-opacity=".35"/>` +
-    disc +
-    fish +
-    `<g fill="none"${arcOpacity}>${arcs.join('')}</g>` +
+    // Two complete drawings switched by the media query. A stylesheet cannot
+    // override a presentation attribute (`fill="#000"` outranks any `fill:`
+    // declaration), and both paints must swap together, so the pair is duplicated
+    // rather than expressed as one attribute plus a rule.
+    `<style>#fishDark{display:none}@media (prefers-color-scheme: dark){#fishLight{display:none}#fishDark{display:inline}}</style>` +
+    `<g fill="none" stroke-opacity="${reducedMotion ? '1' : '.95'}">` +
+    `<circle cx="16" cy="16" r="12.5" fill="none" stroke="${track}" stroke-width="2.6" stroke-opacity=".35"/>` +
+    arcs.join('') +
+    `</g>` +
+    `<g transform="translate(${String(offset)} ${String(offset)}) scale(${String(fishScale)})" id="fish">` +
+    `<g id="fishLight">${drawing(FISH_PALETTE.light)}</g>` +
+    `<g id="fishDark">${drawing(FISH_PALETTE.dark)}</g>` +
+    `</g>` +
     badge +
     `</svg>`
   )
