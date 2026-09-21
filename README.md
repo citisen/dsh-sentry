@@ -219,6 +219,17 @@ npm run verify               # just the verification scripts
 npm run watch                # rebuild on save, for dsh-client-hmr
 ```
 
+Three checks in three places, each one covering what the one before it cannot:
+
+| Check | Runs | Catches |
+| --- | --- | --- |
+| `verify-host.mjs` | Node | A schema whose defaults or ranges drifted from what the browser half assumes |
+| `verify-client.mjs` | Node, stubbed | Every pure decision: the state precedence, the completion edge, the icon geometry, the title composition, the sound gating, the settings row, and `apply()` end to end against stub services |
+| `browser-check.mjs` | Headless Chrome | The three things a stub cannot judge: whether the browser **decodes** the favicon data URL (an unencoded `#` truncates it into half a fish, with no error anywhere), whether the DOM contract holds (its own `<link>` appended to the head, the app's link left alone, its own element removed), and whether the `MutationObserver` title guard survives the browser's own scheduling |
+
+The browser check skips cleanly when no Chromium-based browser is installed, so
+it is safe in CI; `DSH_REQUIRE=1` turns that skip into a failure.
+
 `src/client.js` is the only source of the browser half. It is written as an ES
 module for readability, but a DSH client bundle is a **classic script** that may
 only register a lazy CommonJS factory through `window.__ModuleLoader__`, so

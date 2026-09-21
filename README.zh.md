@@ -154,6 +154,16 @@ npm run verify               # 只跑校验脚本
 npm run watch                # 保存即重建，配合 dsh-client-hmr
 ```
 
+三处检查各管一段，每一段都是前一段查不到的：
+
+| 检查 | 运行方式 | 覆盖 |
+| --- | --- | --- |
+| `verify-host.mjs` | Node | schema 的默认值与区间是否偏离浏览器半边的假设 |
+| `verify-client.mjs` | Node + 桩 | 全部纯决策：状态优先级、完成沿、图标几何、标题合成、声音门控、设置行，以及 `apply()` 对桩服务的端到端接线 |
+| `browser-check.mjs` | 无头 Chrome | 桩判断不了的三件事：浏览器是否**真的解码**了 favicon 的 data URL（一个没编码的 `#` 会在那里截断成半条鱼，且哪里都不报错）、DOM 契约是否成立（自己的 `<link>` 挂到 head、不碰应用自己的那个、自己移除自己的元素）、以及 `MutationObserver` 的标题守卫能否挺过浏览器自己的调度时机 |
+
+没装 Chromium 系浏览器时浏览器检查会干净地跳过，因此 CI 里是安全的；设 `DSH_REQUIRE=1` 可以把跳过变成失败。
+
 `src/client.js` 是浏览器半边的唯一来源。它写成 ES 模块便于阅读，但 DSH 客户端 bundle 是**经典脚本**，只能通过 `window.__ModuleLoader__` 注册一个惰性 CommonJS 工厂，所以 `scripts/build-client.mjs` 会套上那个外壳并改写静态 import（这也是里面没有 JSX 的原因 —— 那个变换刻意做得很窄，遇到它表达不了的形式就直接失败）。
 
 `src/fish.txt` 是生成物：它是已发布 favicon 的路径，从安装好的 dsh 里提取而不是手抄，因为一个手抄的 3400 字符路径就是一条抄错了一位的路径。构建时它被替换进 bundle，`verify-client.mjs` 则把提交的副本与安装的图形对比。
