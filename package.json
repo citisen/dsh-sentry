@@ -1,6 +1,6 @@
 {
   "name": "@citisen/dsh-sentry",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DeepSeek Harness plugin: watch every session from another tab — a status ring on the original fish favicon, a tab-title prefix, and a synthesized chime",
   "type": "module",
   "license": "MIT",

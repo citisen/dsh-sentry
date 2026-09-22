@@ -4,12 +4,12 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The plugin has **never been published**. `0.1.0` is the first release and it has
-to be published by hand once, before trusted publishing can be configured for it
-— a trusted publisher lives on the package's own settings page, and a package
-that does not exist yet has no settings page. Everything after that goes through
-CI staging plus a human approval, and a local `npm publish` failing is then the
-setup working rather than the setup broken.
+The next version to ship is **0.1.1** — `0.1.0` was published by hand on
+2026-09-21, before trusted publishing could be configured for it. `0.1.1` carries
+the compatibility release for dsh `0.1.7-alpha.1`, which replaced the Web client's
+settings service: the plugin now binds settings optionally and names the mismatch
+instead of waiting forever for a service that release does not have (see the
+README's Compatibility section).
 
 ## The short version
 
@@ -45,9 +45,11 @@ npm view @citisen/dsh-sentry dist-tags
 
 ## Bootstrapping the first release
 
-*Not yet done — this is the one paragraph that differs from the sibling
-packages.* Trusted publishing is configured on a package's **own settings page**,
-so the first version has to be published by hand:
+*Step 1 is done: `0.1.0` was published by hand on 2026-09-21. Steps 2 and 3 are
+what the next release proves — a trusted publisher configured on the package's own
+settings page, and `0.1.1` staged by CI and approved by hand.* Trusted publishing
+is configured on a package's **own settings page**, so the first version has to be
+published by hand:
 
 1. Publish `0.1.0` locally with your 2FA:
 
