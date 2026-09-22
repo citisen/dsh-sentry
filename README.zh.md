@@ -2,6 +2,68 @@
 
 [English](README.md) | 中文
 
+## dsh 起不来怎么办
+
+你正在看的报错就是这三行 ——
+
+    Failed to load plugins
+    web boot: 3 entries did not activate
+    @citisen/dsh-sentry: pending (waiting for service: settingsScope)
+
+「启用的条目却始终不激活」在 dsh 里算**启动失败**而不是警告：它会拒绝完成启动，而不是少个插件
+照常起来。三条出路，从快到慢，**三条都在 dsh 起不来的情况下可用**。本插件在 profile 里的行是
+`id: sentry`，对应 `name: '@citisen/dsh-sentry'`。
+
+**1. 禁用它 —— 在 profile 自己的补丁层里加一条**
+（`$DSH_HOME/profiles/web/cordis.patch.yml`，这一层在所有 bundle 层之后应用）：
+
+    - id: sentry
+      disabled: true
+
+不用敲命令、不用联网、不用装东西；删掉这两行它就回来了。`dsh --profile web --dump-config`
+会打印组装后的树 —— 每个行的 id 和包名，不管它属于谁 —— 补丁生效时这一行会带
+`disabled: true`；它不加载任何插件，所以 dsh 起不来时也能用。
+
+**2. 只影响这一次启动，什么都不改** —— 把同样两行写进你自己的文件，当叠加层传进去：
+
+    dsh --profile web --patch ./no-sentry.yml web
+
+**3. 卸载它** —— 一条命令同时摘掉依赖和 bundle 层（`dsh.profile.bundles` 会按已安装状态自动
+对齐）。它只是转发给 profile 目录里的 pnpm，不组装 profile，所以 dsh 起不来时也能跑：
+
+    dsh plugin --profile web remove @citisen/dsh-sentry
+
+需要 `PATH` 上有 `pnpm`。没有的话，就手工从 `$DSH_HOME/profiles/web/package.json` 的
+`dsh.profile.bundles`（以及对应的 `dependencies`）里删掉包名。
+
+**或者先要一个能用的 dsh**：用官方模板起一个干净的 profile，它不带你装的任何 bundle：
+
+    dsh --profile rescue --from-default-profile web
+
+## 兼容性
+
+本构建面向 dsh **0.1.5-rc.x** 系列 —— 也就是当前的 `latest`（`0.1.5-rc.2`）和 `next`
+（`0.1.5-rc.3`）—— 同时也能在 `0.1.7-alpha.1` 上激活；那个版本改掉了它读的两个客户端界面。
+**那个版本唯一拿走的是设置**：样式文档读不到也存不下，于是 sentry 按出厂默认值工作，原因会打印
+在浏览器控制台和 dsh 日志里，而不是留给用户去猜。
+
+| 它读什么 | 0.1.5-rc.x | 0.1.7-alpha.1 |
+| --- | --- | --- |
+| 某个会话在等你 | `uiSession.pendingInteractions` | `uiSession.sessionStatus`，其值里带 `pendingInteraction` |
+| 样式文档 | `settingsScope.bind({ namespace })` + 宿主 `settings.register()` | `configForms.get(entryId)` + Loader entry 的 `.volatile()` 字段 —— **尚未实现** |
+
+等待/审批状态会按 dsh 实际提供的那一种形状去读，所以两条线上都会点亮标签页；这段映射由
+`npm run verify` 覆盖。两者都不提供的 dsh 只会被报告一次「看不见状态」，而不会让激活失败 ——
+失败的条目会直接阻断 web 启动。
+
+`0.1.0` 及更早的版本在 0.1.7 上根本不会激活：它一直等一个那个版本并不存在的服务，启动审计把它
+列为「未激活」的条目。`0.1.1` 在两条线上都能激活。**设置**那一项两边任一都能解决：把 dsh 钉住
+（`npx @deepseek-ai/dsh@0.1.5-rc.2 web`，或 `@next`），或者等一个会说 `configForms` 的版本。
+
+**如果存在 `$DSH_HOME/settings.yaml.imported`，不要删它。** dsh 0.1.7 会把旧的
+`settings.yaml` 导入一次并改名，凡是它不认的 section（包括本插件的 `alert`）都只留在改名后
+的文件里 —— 那个文件是那份样式文档的唯一副本。
+
 **DeepSeek Harness Web 界面的标签页哨兵**：你在别的标签页时，它替你盯着所有会话，该你出手的时候叫你回来。
 
 界面在你**正看着它**的时候已经把一切都说了 —— 侧边栏每个会话有状态点，对话自己有流式指示。但只要标签页退到后台，它就什么都不说了，而这恰好是长任务运行的时候。这个插件的职责是从房间另一头回答一个问题 —— *有事情需要我吗？* —— 用的是后台标签页仅有的三个通道：**图标**、**标题**、**声音**。

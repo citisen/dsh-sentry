@@ -186,6 +186,7 @@ const CHECKLIST = `
         },
         unset: () => undefined,
       }
+      const settingsScopeService = { bind: () => scope }
       const ctx = {
         effect: (execute) => {
           execute()
@@ -193,8 +194,14 @@ const CHECKLIST = `
         },
         on: () => undefined,
         get: () => undefined,
+        // The optional bind: this page's composition provides the service, so the
+        // plugin binds it exactly as it does against a real dsh.
+        inject: (deps, callback) => {
+          callback(ctx)
+          return { dispose: () => undefined }
+        },
         locale: { register: () => () => undefined, bind: () => (key) => key },
-        settingsScope: { bind: () => scope },
+        settingsScope: settingsScopeService,
         sessions: {
           list: {
             getSnapshot: () => sessionSnapshot,

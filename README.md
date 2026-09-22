@@ -2,6 +2,79 @@
 
 [English](README.md) | [中文](README.zh.md)
 
+## If dsh will not boot
+
+The three lines you are looking at are these —
+
+    Failed to load plugins
+    web boot: 3 entries did not activate
+    @citisen/dsh-sentry: pending (waiting for service: settingsScope)
+
+An enabled plugin row that never activates is a failed boot, not a warning: dsh refuses
+to finish starting rather than loading without the plugin. Three ways out, fastest
+first, and **all three work while dsh cannot start**. This plugin's row in the profile is
+`id: sentry`, for `name: '@citisen/dsh-sentry'`.
+
+**1. Disable it — one entry in the profile's own patch layer**
+(`$DSH_HOME/profiles/web/cordis.patch.yml`, applied after every bundle layer):
+
+    - id: sentry
+      disabled: true
+
+No command, no network, nothing to install, and deleting those two lines brings the row
+back. `dsh --profile web --dump-config` prints the composed tree — every row's id and
+package name, whoever it belongs to — and marks this row `disabled: true` once the patch
+takes effect; it loads no plugin, so it works while dsh cannot start.
+
+**2. One boot only, changing nothing** — put the same two lines in a file of your own
+and pass it as an overlay:
+
+    dsh --profile web --patch ./no-sentry.yml web
+
+**3. Remove it** — one command drops the dependency *and* the bundle layer
+(`dsh.profile.bundles` is reconciled against what is installed). It forwards to pnpm in
+the profile directory and never composes the profile, so it runs while dsh cannot start:
+
+    dsh plugin --profile web remove @citisen/dsh-sentry
+
+It needs `pnpm` on `PATH`; without it, delete the package name from
+`dsh.profile.bundles` (and the matching `dependencies` entry) in
+`$DSH_HOME/profiles/web/package.json` by hand.
+
+**Or just get a working dsh now**: boot a clean profile from the shipped template, which
+carries none of your bundles:
+
+    dsh --profile rescue --from-default-profile web
+
+## Compatibility
+
+This build targets the dsh **0.1.5-rc.x** line — today's `latest` (`0.1.5-rc.2`) and
+`next` (`0.1.5-rc.3`) — and it also activates on `0.1.7-alpha.1`, which reworked two of the
+client surfaces it reads. **Settings are the only thing that release takes away**: there the
+alert document is neither read nor saved, so the sentry draws its shipped defaults, and the
+reason is named in the browser console and in the dsh log rather than left to guesswork.
+
+| what it reads | 0.1.5-rc.x | 0.1.7-alpha.1 |
+| --- | --- | --- |
+| a session waiting on you | `uiSession.pendingInteractions` | `uiSession.sessionStatus`, whose values carry `pendingInteraction` |
+| the style document | `settingsScope.bind({ namespace })`, Host `settings.register()` | `configForms.get(entryId)` with `.volatile()` Loader-entry fields — **not implemented** |
+
+The waiting and approval states are read from whichever of the two shapes dsh provides, so
+they still light the tab on either line; the mapping is exercised by `npm run verify`. A dsh
+that offers neither is reported once as blind rather than failing activation, because a
+failed entry blocks the web boot.
+
+Up to `0.1.0` this plugin did not activate on 0.1.7 at all — it waited for a service that
+release does not have, and the boot audit reported it as an entry that never activated.
+`0.1.1` activates on either line. Either side of the line fixes the *settings*: pin dsh
+(`npx @deepseek-ai/dsh@0.1.5-rc.2 web`, or `@next`), or wait for a build that speaks
+`configForms`.
+
+**If `$DSH_HOME/settings.yaml.imported` exists, do not delete it.** dsh 0.1.7 imports the
+old `settings.yaml` once and renames it, and any section it does not recognize — this
+plugin's own `alert` section included — stays only in the renamed file. That file is the
+last copy of that style document.
+
 A **tab-page sentry for the DeepSeek Harness Web GUI**: while you are on another
 tab, it watches every session and tells you when you are actually needed.
 

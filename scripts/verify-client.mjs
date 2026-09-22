@@ -151,7 +151,12 @@ assert.equal(typeof registration.factory, 'function')
 const plugin = registration.factory(requireStub)
 assert.equal(typeof plugin.apply, 'function', 'bundle must export apply()')
 assert.ok(Array.isArray(plugin.inject), 'bundle must export inject as an array')
-assert.deepEqual(plugin.inject, ['slots', 'locale', 'settingsScope', 'sessions', 'uiSession'])
+// Settings are bound optionally, not required. A dsh that stops providing the
+// service — 0.1.7-alpha.1 replaced `settingsScope` with `configForms` — must
+// leave this plugin activated on its defaults instead of `pending` forever,
+// which is what a required entry in this list buys. The last block of this file
+// runs that composition.
+assert.deepEqual(plugin.inject, ['slots', 'locale', 'sessions', 'uiSession'])
 assert.equal(
   typeof plugin.sentryFavicon,
   'function',
@@ -1864,6 +1869,8 @@ globalThis.window.AudioContext = undefined
  */
 const rowBindings = []
 
+const settingsScopeService = { bind: (spec) => (assert.equal(spec.namespace, 'alert'), scope) }
+
 const ctx = {
   effect: (execute) => {
     const disposer = execute()
@@ -1871,7 +1878,15 @@ const ctx = {
     return { dispose: () => undefined }
   },
   on: () => undefined,
-  get: () => undefined,
+  get: (name) => (name === 'settingsScope' ? settingsScopeService : undefined),
+  // The optional bind under test: the service is present here, so the callback
+  // runs as it does in the browser. `settingsScope` stays on the fixture context
+  // as well, because that is the context a bound scope is read from.
+  inject: (deps, callback) => {
+    assert.deepEqual(deps, ['settingsScope'])
+    callback(ctx)
+    return { dispose: () => undefined }
+  },
   locale: {
     register: (namespace, dict) => {
       dictionaries.push({ namespace, dict })
@@ -1879,7 +1894,7 @@ const ctx = {
     },
     bind: () => (key) => key,
   },
-  settingsScope: { bind: (spec) => (assert.equal(spec.namespace, 'alert'), scope) },
+  settingsScope: settingsScopeService,
   sessions: {
     list: {
       getSnapshot: () => sessionState,
@@ -2153,6 +2168,88 @@ const ctx = {
   // mounted then would belong to nobody and never come off the tab.
   actions.preview('done')
   assert.equal(mountedIcons().length, 0, 'a render after teardown must not put an icon back')
+
+  // ── a dsh whose `uiSession` carries the 0.1.7 status source ───────────────
+  //
+  // 0.1.7-alpha.1 replaced `uiSession.pendingInteractions` with
+  // `uiSession.sessionStatus`, whose values carry `pendingInteraction`. Reaching
+  // for the old member unguarded made this plugin FAIL activation there, and a
+  // failed entry blocks the web boot outright — so the newer source is read when
+  // the older one is absent, and it has to light the tab exactly the same way.
+  {
+    let statusState = new Map()
+    let statusListener
+    let reopenedRow
+    const errors = []
+    const statusCtx = {
+      ...ctx,
+      uiSession: {
+        sessionStatus: {
+          getSnapshot: () => statusState,
+          subscribe: (listener) => {
+            statusListener = listener
+            return () => {
+              statusListener = undefined
+            }
+          },
+        },
+      },
+      locale: { register: () => () => undefined, bind: () => (key) => key },
+      slots: {
+        inject: (name, callback) => {
+          assert.equal(name, 'settings.general.item')
+          callback()
+        },
+        register: (options) => {
+          reopenedRow = options
+          return () => undefined
+        },
+      },
+    }
+
+    const before = effects.length
+    const realError = console.error
+    console.error = (...args) => errors.push(args.join(' '))
+    try {
+      plugin.apply(statusCtx)
+    } finally {
+      console.error = realError
+    }
+
+    assert.ok(reopenedRow !== undefined, 'the row must register against the 0.1.7 shape')
+    assert.equal(typeof statusListener, 'function', 'the 0.1.7 status source must be subscribed')
+    assert.deepEqual(errors, [], 'a dsh with the newer source must not be reported as blind')
+
+    // A question reported through the new source lights the tab exactly as the
+    // dedicated map did.
+    documentStub.title = 'DeepSeek Harness'
+    sessionState = {
+      ids: ['s1'],
+      byId: { s1: { id: 's1', blank: false, running: true, completed: false } },
+    }
+    statusState = new Map([
+      ['s1', { running: true, pendingInteraction: { sessionId: 's1', kind: 'question' } }],
+    ])
+    statusListener()
+    assert.equal(mountedIcons().length, 1, 'the newer source must light the tab too')
+    assert.equal(shown(documentStub.title), '① alert.status.waiting · DeepSeek Harness')
+
+    // A plan review is as much a demand on the user as an approval is. The
+    // approval segment carries no count glyph — the number in the prefix is the
+    // waiting count — so the segment alone is what changes.
+    statusState = new Map([
+      ['s1', { running: true, pendingInteraction: { sessionId: 's1', kind: 'plan-review' } }],
+    ])
+    statusListener()
+    assert.equal(shown(documentStub.title), 'alert.status.approval · DeepSeek Harness')
+
+    // And the engine this second activation built comes off the tab with it.
+    statusState = new Map()
+    sessionState = { ids: [], byId: {} }
+    statusListener()
+    for (const dispose of effects.slice(before).reverse()) dispose()
+    assert.equal(mountedIcons().length, 0, 'the second activation releases its icon')
+  }
 }
 
 // ── the manifest contract ───────────────────────────────────────────────────
@@ -2165,6 +2262,76 @@ const ctx = {
   const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')
   assert.ok(patch.includes('- id: sentry'), 'the patch must insert the plugin row')
   assert.ok(patch.includes(`name: '${PACKAGE_NAME}'`), 'and it must name this package')
+}
+
+// ── a composition that provides no `settingsScope` ──────────────────────────
+//
+// dsh 0.1.7-alpha.1 replaced the Web client's settings service with
+// `configForms`. A build that required the old name never activated there at
+// all: the boot audit listed this plugin as an entry that "did not activate",
+// waiting for a service that release does not have. The service is optional now,
+// and this is the composition that must still run the sentry and fill the row,
+// with one honest report — at activation, when the replacement service makes the
+// mismatch visible, and never twice.
+{
+  const incompatibleSlots = []
+  const incompatibleDictionaries = []
+  const reported = []
+  const replacementOnlyCtx = {
+    ...ctx,
+    // Only the REPLACEMENT service exists, which is what makes the mismatch
+    // visible without waiting for anything.
+    get: (name) => (name === 'configForms' ? {} : undefined),
+    inject: (deps) => {
+      assert.deepEqual(deps, ['settingsScope'])
+      // And it never arrives: this composition started without it.
+      return { dispose: () => undefined }
+    },
+    locale: {
+      register: (namespace, dict) => {
+        incompatibleDictionaries.push({ namespace, dict })
+        return () => undefined
+      },
+      bind: () => (key) => key,
+    },
+    slots: {
+      inject: (name, callback) => {
+        assert.equal(name, 'settings.general.item')
+        callback()
+      },
+      register: (options, component) => {
+        incompatibleSlots.push({ options, component })
+        return () => undefined
+      },
+    },
+  }
+
+  const realError = console.error
+  console.error = (...args) => reported.push(args.join(' '))
+  const registeredEffects = effects.length
+  try {
+    plugin.apply(replacementOnlyCtx)
+    assert.equal(reported.length, 1, 'a visible mismatch is reported at activation')
+    // The writes the row offers must not throw on a scope that never resolves,
+    // and must not repeat a report the page already carries.
+    const actions = incompatibleSlots[0].options.inject(incompatibleSlots[0].options.store.create())
+    actions.setField('style', 'icon on')
+    actions.reset()
+  } finally {
+    console.error = realError
+  }
+
+  assert.equal(incompatibleSlots.length, 1, 'the row must register without a settings service')
+  assert.equal(incompatibleDictionaries.length, 1, 'the row copy must register too')
+  assert.equal(reported.length, 1, 'the mismatch is reported once, not once per write')
+  assert.match(reported[0], /settingsScope/)
+  assert.match(reported[0], /configForms/)
+  assert.match(reported[0], /0\.1\.5-rc\.x/)
+  assert.match(reported[0], /@citisen\/dsh-sentry/)
+
+  // The sentry's own timers must not outlive the stub document: release what this
+  // activation registered, exactly as the block above releases its own.
+  for (const dispose of effects.slice(registeredEffects).reverse()) dispose()
 }
 
 delete globalThis.document
