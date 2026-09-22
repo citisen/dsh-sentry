@@ -13,12 +13,12 @@ The three lines you are looking at are these —
 An enabled plugin row that never activates is a failed boot, not a warning: dsh refuses
 to finish starting rather than loading without the plugin. Three ways out, fastest
 first, and **all three work while dsh cannot start**. This plugin's row in the profile is
-`id: sentry`, for `name: '@citisen/dsh-sentry'`.
+`id: alert`, for `name: '@citisen/dsh-sentry'`.
 
 **1. Disable it — one entry in the profile's own patch layer**
 (`$DSH_HOME/profiles/web/cordis.patch.yml`, applied after every bundle layer):
 
-    - id: sentry
+    - id: alert
       disabled: true
 
 No command, no network, nothing to install, and deleting those two lines brings the row
@@ -48,32 +48,49 @@ carries none of your bundles:
 
 ## Compatibility
 
-This build targets the dsh **0.1.5-rc.x** line — today's `latest` (`0.1.5-rc.2`) and
-`next` (`0.1.5-rc.3`) — and it also activates on `0.1.7-alpha.1`, which reworked two of the
-client surfaces it reads. **Settings are the only thing that release takes away**: there the
-alert document is neither read nor saved, so the sentry draws its shipped defaults, and the
-reason is named in the browser console and in the dsh log rather than left to guesswork.
+This build runs on both dsh lines: the **0.1.5-rc.x** line (today's `latest` and
+`next`) and **0.1.7-alpha.1**, whose settings model it also speaks. One string names
+this plugin's section on both — `alert` — because the 0.1.7 line keys settings by
+Loader entry id and this bundle's patch inserts the entry under that name, while the
+0.1.5 line registers the same name as a settings namespace.
 
 | what it reads | 0.1.5-rc.x | 0.1.7-alpha.1 |
 | --- | --- | --- |
 | a session waiting on you | `uiSession.pendingInteractions` | `uiSession.sessionStatus`, whose values carry `pendingInteraction` |
-| the style document | `settingsScope.bind({ namespace })`, Host `settings.register()` | `configForms.get(entryId)` with `.volatile()` Loader-entry fields — **not implemented** |
+| the durable section | `settingsScope.bind({ namespace: 'alert' })` | `configForms.get('alert')`, over the entry's own `Config` |
+| the host contract | `settings.register('alert', schema)` | the exported `Config`, its fields marked `.volatile()` |
+
+Both are bound optionally, so a dsh that provides neither still activates: the plugin
+never sits `pending` — which blocks the boot outright — and never throws on activation.
+It runs on the shipped defaults, and the first control you touch says why nothing is
+saved. Up to `0.1.1` the plugin required the 0.1.5 service, so on
+`0.1.7-alpha.1` it was reported as an entry that "did not activate"; `0.1.2`
+speaks both lines.
 
 The waiting and approval states are read from whichever of the two shapes dsh provides, so
 they still light the tab on either line; the mapping is exercised by `npm run verify`. A dsh
 that offers neither is reported once as blind rather than failing activation, because a
 failed entry blocks the web boot.
 
-Up to `0.1.0` this plugin did not activate on 0.1.7 at all — it waited for a service that
-release does not have, and the boot audit reported it as an entry that never activated.
-`0.1.1` activates on either line. Either side of the line fixes the *settings*: pin dsh
-(`npx @deepseek-ai/dsh@0.1.5-rc.2 web`, or `@next`), or wait for a build that speaks
-`configForms`.
+### Settings lost to the 0.1.7 rename
 
-**If `$DSH_HOME/settings.yaml.imported` exists, do not delete it.** dsh 0.1.7 imports the
-old `settings.yaml` once and renames it, and any section it does not recognize — this
-plugin's own `alert` section included — stays only in the renamed file. That file is the
-last copy of that style document.
+dsh 0.1.7 imports a legacy `$DSH_HOME/settings.yaml` once — each section into the entry
+of the same id — and renames the file to `settings.yaml.imported`. Before
+`0.1.2` this plugin's entry was named `sentry`, so a `alert` section had
+nowhere to go and stayed only in the renamed file. The names match now, so dsh's own
+import can put those values back:
+
+1. Copy `$DSH_HOME/settings.yaml.imported` to `$DSH_HOME/settings.yaml` (a copy, not a
+   move — the file is the only record until the import runs), and keep only the keys the
+   entry still declares: dsh validates the section against that entry's schema and refuses
+   the whole section over a single unknown key, so drop every key the table above does not
+   list. In the old `alert` section only `style` survives — `volume`, `fishScale`, `title`,
+   `sound` and `doneWindowMs` are lines of that document now.
+2. Start dsh 0.1.7 once with the profile you use. Every section whose entry now exists
+   — `alert` among them — is written into that profile's Cordis patch.
+3. A section dsh still does not recognize is reported and stays in
+   `settings.yaml.imported`, so **keep that file until you have what you need out of
+   it**.
 
 A **tab-page sentry for the DeepSeek Harness Web GUI**: while you are on another
 tab, it watches every session and tells you when you are actually needed.

@@ -62,6 +62,7 @@ const {
   ALERT_NAMESPACE,
   ALERT_FIELDS,
   AlertSchema,
+  Config,
   DEFAULT_STYLE_DOCUMENT,
   apply,
 } = host
@@ -130,10 +131,67 @@ assert.ok(registered[0].schema !== undefined)
 // it is configurable.
 apply({ inject: () => undefined, get: () => undefined })
 
-// A settings service without `register` is a dsh whose settings model moved —
-// 0.1.7-alpha.1 replaced the API rather than renaming it. Registering is
-// impossible there, so the plugin's job is to say why, in its own words, instead
-// of leaving an opaque TypeError beside a boot audit about plugin activation.
+// ── the 0.1.7 line: the entry's Config is the section ──────────────────────
+//
+// That line's settings service has `configure` and no `register`: the durable
+// section is the entry's own exported `Config`, whose single field is marked
+// `.volatile()` so the configuration editor knows it may write the document.
+{
+  const configured = []
+  const errors = []
+  const fiber = { name: 'alert' }
+  apply({
+    fiber,
+    inject: (_deps, callback) => {
+      callback({
+        effect: (execute) => {
+          execute()
+          return { dispose: () => undefined }
+        },
+        settings: {
+          configure: (presentation, owner) => {
+            configured.push({ presentation, owner })
+            return () => undefined
+          },
+        },
+        logger: { error: (message) => errors.push(message) },
+      })
+    },
+    get: () => undefined,
+  })
+  assert.equal(configured.length, 1, 'the generated page must be turned off exactly once')
+  assert.deepEqual(configured[0].presentation, { auto: false })
+  assert.equal(configured[0].owner, fiber, 'the policy belongs to this plugin fiber')
+  assert.deepEqual(errors, [], 'the 0.1.7 settings API is supported, not reported')
+}
+
+// The field the durable schema validates must also be offered to the 0.1.7
+// configuration editor, or the document would be editable on one line and not the
+// other.
+{
+  assert.ok(Config !== undefined, 'the entry must export a Config for the 0.1.7 line')
+  assert.deepEqual(
+    Object.keys(Config({})).sort(),
+    Object.keys(AlertSchema({})).sort(),
+    'the two schemas must describe the same fields',
+  )
+  // Only volatile fields are exposed to the 0.1.7 configuration editor, and this
+  // verifier runs against the copy of schemastery that exposes no `.volatile()` at
+  // all — so this is the assertion that catches a marking that silently did
+  // nothing, which is what made dsh refuse to import this entry's settings.
+  for (const [field, schema] of Object.entries(Config.dict ?? {})) {
+    assert.equal(
+      schema.meta.volatile,
+      true,
+      `${field} must be marked volatile, or the 0.1.7 configuration editor cannot write it`,
+    )
+  }
+}
+
+// A settings service with neither call is a dsh whose settings model moved again.
+// Registering is impossible there, so the plugin's job is to say why, in its own
+// words, instead of leaving an opaque TypeError beside a boot audit about plugin
+// activation.
 {
   const errors = []
   apply({
@@ -144,6 +202,7 @@ apply({ inject: () => undefined, get: () => undefined })
   })
   assert.equal(errors.length, 1, 'the unsupported settings API must be reported')
   assert.match(errors[0], /settings\.register/)
+  assert.match(errors[0], /settings\.configure/)
   assert.match(errors[0], /alert/)
   assert.match(errors[0], /0\.1\.5-rc\.x/)
 }

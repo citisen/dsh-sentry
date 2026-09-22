@@ -4,12 +4,18 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The next version to ship is **0.1.1** — `0.1.0` was published by hand on
-2026-09-21, before trusted publishing could be configured for it. `0.1.1` carries
-the compatibility release for dsh `0.1.7-alpha.1`, which replaced the Web client's
-settings service: the plugin now binds settings optionally and names the mismatch
-instead of waiting forever for a service that release does not have (see the
-README's Compatibility section).
+The next version to ship is **0.1.2** — `0.1.0` was published by hand on
+2026-09-21, before trusted publishing could be configured for it.
+
+`0.1.1` is staged and superseded by it: that release made the plugin *activate* on
+dsh `0.1.7-alpha.1` instead of failing there, but left its style document
+unreadable on that line. `0.1.2` speaks that line's settings model — the entry's
+exported `Config` with volatile fields, read and written through `configForms` —
+and renames the Loader row from `sentry` to `alert`, so one string names the
+section on both dsh lines. **Reject the `0.1.1` stage** when staging this one;
+approving both would leave two stages for the same dist-tag. The README's
+Compatibility section also records what that rename lets dsh's own import restore,
+and which old keys an imported section has to drop.
 
 ## The short version
 
