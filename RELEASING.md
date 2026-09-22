@@ -4,18 +4,28 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The next version to ship is **0.1.2** — `0.1.0` was published by hand on
+The next version to ship is **0.1.3** — `0.1.0` was published by hand on
 2026-09-21, before trusted publishing could be configured for it.
 
-`0.1.1` is staged and superseded by it: that release made the plugin *activate* on
-dsh `0.1.7-alpha.1` instead of failing there, but left its style document
-unreadable on that line. `0.1.2` speaks that line's settings model — the entry's
-exported `Config` with volatile fields, read and written through `configForms` —
-and renames the Loader row from `sentry` to `alert`, so one string names the
-section on both dsh lines. **Reject the `0.1.1` stage** when staging this one;
-approving both would leave two stages for the same dist-tag. The README's
-Compatibility section also records what that rename lets dsh's own import restore,
-and which old keys an imported section has to drop.
+`0.1.2` is staged and superseded by it: that release made the plugin *activate* on dsh
+`0.1.7-alpha.1`, speaks that line's settings model — the entry's exported `Config` with
+volatile fields, read and written through `configForms` — and renames the Loader row
+from `sentry` to `alert`, so one string names the section on both dsh lines. What it
+got wrong, and `0.1.3` fixes, came out of running it against a real `0.1.7-alpha.1`:
+
+- It read only the `value` layer of a form on that line. Settings there live in two:
+  `value` is what the entry runs with and `user` is the profile patch the user edited,
+  so the row showed the shipped document again on every open and every edit looked
+  discarded. `0.1.3` decodes the user's layer over the running one.
+- A completion accepted in the style field — `alw` completed to `always` with Tab —
+  moved the editor's text without announcing it, so the half-typed word is what got
+  saved. `0.1.3` reconciles the field on blur and on the way out, on top of the fix in
+  `@citisen/litearea@0.2.2` (now the pinned engine; the bundle inlines it).
+
+**Reject the `0.1.2` stage** when staging this one; approving both would leave two
+stages for the same dist-tag, and approving `0.1.2` would ship both defects. The
+README's Compatibility section also records what the row rename lets dsh's own import
+restore, and which old keys an imported section has to drop.
 
 ## The short version
 

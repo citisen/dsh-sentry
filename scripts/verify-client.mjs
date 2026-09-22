@@ -2336,21 +2336,26 @@ const ctx = {
 // ── the 0.1.7 line: the entry's own configuration form ──────────────────────
 //
 // There the section is addressed by Loader entry id (`alert`, the row the bundle
-// patch inserts) and read through `configForms`, whose snapshot carries the stored
-// section rather than decoded settings. A stored document must reach the engine,
-// a change pushed by the Host must repaint, and a write must reach the form — that
-// is the whole of "the style document works on 0.1.7".
+// patch inserts) and read through `configForms`. Its snapshot carries the settings
+// in layers — `value` is what the entry runs with, `user` is the profile patch the
+// user edited — and a write lands in `user`. A row that read `value` alone would
+// run the shipped document and forget every edit on reopen, which is exactly what
+// shipped once. So both layers are modelled here, and the user's document is the
+// one the engine must use.
 {
   const formWrites = []
   const formSlots = []
   const formDictionaries = []
-  let formValue = { style: 'title off' }
+  const running = { style: 'title on\nsound off' }
+  let userLayer = { style: 'title off' }
   let formListener
 
   const form = {
     getSnapshot: () => ({
       status: 'ready',
-      value: formValue,
+      value: running,
+      base: running,
+      user: userLayer,
       revision: 9,
       writable: true,
       mode: 'host',
@@ -2361,7 +2366,7 @@ const ctx = {
     },
     set: (field, value) => {
       formWrites.push({ op: 'set', field, value })
-      formValue = { ...formValue, [field]: value }
+      userLayer = { ...userLayer, [field]: value }
       // A committed write folds its answer back into the shared mirror, which is
       // what notifies subscribers in the browser.
       formListener?.()
@@ -2369,8 +2374,8 @@ const ctx = {
     },
     unset: (field) => {
       formWrites.push({ op: 'unset', field })
-      const { [field]: _removed, ...kept } = formValue
-      formValue = kept
+      const { [field]: _removed, ...kept } = userLayer
+      userLayer = kept
       formListener?.()
       return Promise.resolve(true)
     },
@@ -2422,16 +2427,17 @@ const ctx = {
   assert.equal(formDictionaries.length, 1, 'the row copy must register too')
 
   // The row's inject face is what binds the mounted instance's actions, and that
-  // is when the engine syncs it — so the stored document must arrive there.
+  // is when the engine syncs it — so the user's document must arrive there, over
+  // the running one, and not the shipped document the entry is running with.
   const actions = formSlots[0].inject(formSlots[0].store)
   assert.equal(
     rowBindings.at(-1).state.style,
     'title off',
-    'the stored document must reach the row',
+    "the user's layer must win over the running document",
   )
 
   // A document pushed by the Host repaints: the form subscription is live.
-  formValue = { style: 'title on' }
+  userLayer = { style: 'title on' }
   formListener()
   assert.equal(
     rowBindings.at(-1).state.style,
