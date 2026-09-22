@@ -1871,6 +1871,15 @@ const rowBindings = []
 
 const settingsScopeService = { bind: (spec) => (assert.equal(spec.namespace, 'alert'), scope) }
 
+/**
+ * The settings services this fixture's composition provides, as cordis would
+ * resolve them.
+ *
+ * This is the 0.1.5-rc.x line: a registered namespace scope, and no configuration
+ * form. The case at the end of this file hands the plugin the other line instead.
+ */
+const settingsServices = { settingsScope: settingsScopeService }
+
 const ctx = {
   effect: (execute) => {
     const disposer = execute()
@@ -1878,14 +1887,13 @@ const ctx = {
     return { dispose: () => undefined }
   },
   on: () => undefined,
-  get: (name) => (name === 'settingsScope' ? settingsScopeService : undefined),
-  // The optional bind under test: the service is present here, so the callback
-  // runs as it does in the browser. `settingsScope` stays on the fixture context
-  // as well, because that is the context a bound scope is read from.
+  get: (name) => settingsServices[name],
+  // Cordis runs an injection only when the composition provides every dependency,
+  // so the fixture does the same. That is what makes handing it `configForms`
+  // instead a real test of the other line rather than of the same path twice.
   inject: (deps, callback) => {
-    assert.deepEqual(deps, ['settingsScope'])
-    callback(ctx)
-    return { dispose: () => undefined }
+    if (!deps.every((dep) => settingsServices[dep] !== undefined)) return { dispose: () => undefined }
+    return callback(ctx) ?? { dispose: () => undefined }
   },
   locale: {
     register: (namespace, dict) => {
@@ -1894,7 +1902,7 @@ const ctx = {
     },
     bind: () => (key) => key,
   },
-  settingsScope: settingsScopeService,
+  ...settingsServices,
   sessions: {
     list: {
       getSnapshot: () => sessionState,
@@ -2260,36 +2268,30 @@ const ctx = {
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
   assert.equal(manifest.exports['./client'], './lib/client.js')
   const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')
-  assert.ok(patch.includes('- id: sentry'), 'the patch must insert the plugin row')
+  assert.ok(patch.includes('- id: alert'), 'the patch must insert the plugin row')
   assert.ok(patch.includes(`name: '${PACKAGE_NAME}'`), 'and it must name this package')
 }
 
-// ── a composition that provides no `settingsScope` ──────────────────────────
+// ── a composition that speaks neither settings API ──────────────────────────
 //
-// dsh 0.1.7-alpha.1 replaced the Web client's settings service with
-// `configForms`. A build that required the old name never activated there at
-// all: the boot audit listed this plugin as an entry that "did not activate",
-// waiting for a service that release does not have. The service is optional now,
-// and this is the composition that must still run the sentry and fill the row,
-// with one honest report — at activation, when the replacement service makes the
-// mismatch visible, and never twice.
+// The two known lines are `settingsScope` (0.1.5-rc.x) and `configForms` (0.1.7+).
+// A dsh with neither — a future rename, or a composition without the settings
+// domain at all — must still activate: an entry that never activates blocks the
+// web boot outright, which is how 0.1.7-alpha.1 turned a renamed service into a
+// "Failed to load plugins" card. The sentry runs on its shipped document, and the
+// first control the user touches is what reports why.
 {
-  const incompatibleSlots = []
-  const incompatibleDictionaries = []
+  const bareSlots = []
+  const bareDictionaries = []
   const reported = []
-  const replacementOnlyCtx = {
+  const bareCtx = {
     ...ctx,
-    // Only the REPLACEMENT service exists, which is what makes the mismatch
-    // visible without waiting for anything.
-    get: (name) => (name === 'configForms' ? {} : undefined),
-    inject: (deps) => {
-      assert.deepEqual(deps, ['settingsScope'])
-      // And it never arrives: this composition started without it.
-      return { dispose: () => undefined }
-    },
+    get: () => undefined,
+    // Neither service is provided, so cordis never runs either injection.
+    inject: () => ({ dispose: () => undefined }),
     locale: {
       register: (namespace, dict) => {
-        incompatibleDictionaries.push({ namespace, dict })
+        bareDictionaries.push({ namespace, dict })
         return () => undefined
       },
       bind: () => (key) => key,
@@ -2299,8 +2301,8 @@ const ctx = {
         assert.equal(name, 'settings.general.item')
         callback()
       },
-      register: (options, component) => {
-        incompatibleSlots.push({ options, component })
+      register: (options) => {
+        bareSlots.push(options)
         return () => undefined
       },
     },
@@ -2310,27 +2312,139 @@ const ctx = {
   console.error = (...args) => reported.push(args.join(' '))
   const registeredEffects = effects.length
   try {
-    plugin.apply(replacementOnlyCtx)
-    assert.equal(reported.length, 1, 'a visible mismatch is reported at activation')
-    // The writes the row offers must not throw on a scope that never resolves,
-    // and must not repeat a report the page already carries.
-    const actions = incompatibleSlots[0].options.inject(incompatibleSlots[0].options.store.create())
+    plugin.apply(bareCtx)
+    assert.deepEqual(reported, [], 'activation stays quiet: a composition may bind late')
+    const actions = bareSlots[0].inject(bareSlots[0].store.create())
     actions.setField('style', 'icon on')
     actions.reset()
   } finally {
     console.error = realError
   }
 
-  assert.equal(incompatibleSlots.length, 1, 'the row must register without a settings service')
-  assert.equal(incompatibleDictionaries.length, 1, 'the row copy must register too')
-  assert.equal(reported.length, 1, 'the mismatch is reported once, not once per write')
-  assert.match(reported[0], /settingsScope/)
+  assert.equal(bareSlots.length, 1, 'the row must register without a settings service')
+  assert.equal(bareDictionaries.length, 1, 'the row copy must register too')
+  assert.equal(reported.length, 1, 'the first write reports, and only once')
   assert.match(reported[0], /configForms/)
-  assert.match(reported[0], /0\.1\.5-rc\.x/)
+  assert.match(reported[0], /settingsScope/)
   assert.match(reported[0], /@citisen\/dsh-sentry/)
 
   // The sentry's own timers must not outlive the stub document: release what this
   // activation registered, exactly as the block above releases its own.
+  for (const dispose of effects.slice(registeredEffects).reverse()) dispose()
+}
+
+// ── the 0.1.7 line: the entry's own configuration form ──────────────────────
+//
+// There the section is addressed by Loader entry id (`alert`, the row the bundle
+// patch inserts) and read through `configForms`, whose snapshot carries the stored
+// section rather than decoded settings. A stored document must reach the engine,
+// a change pushed by the Host must repaint, and a write must reach the form — that
+// is the whole of "the style document works on 0.1.7".
+{
+  const formWrites = []
+  const formSlots = []
+  const formDictionaries = []
+  let formValue = { style: 'title off' }
+  let formListener
+
+  const form = {
+    getSnapshot: () => ({
+      status: 'ready',
+      value: formValue,
+      revision: 9,
+      writable: true,
+      mode: 'host',
+    }),
+    subscribe: (listener) => {
+      formListener = listener
+      return () => undefined
+    },
+    set: (field, value) => {
+      formWrites.push({ op: 'set', field, value })
+      formValue = { ...formValue, [field]: value }
+      // A committed write folds its answer back into the shared mirror, which is
+      // what notifies subscribers in the browser.
+      formListener?.()
+      return Promise.resolve(true)
+    },
+    unset: (field) => {
+      formWrites.push({ op: 'unset', field })
+      const { [field]: _removed, ...kept } = formValue
+      formValue = kept
+      formListener?.()
+      return Promise.resolve(true)
+    },
+  }
+
+  const formCtx = {
+    ...ctx,
+    get: () => undefined,
+    inject: (deps, callback) => {
+      if (!deps.includes('configForms')) return { dispose: () => undefined }
+      return callback(formCtx) ?? { dispose: () => undefined }
+    },
+    configForms: {
+      get: (entryId) => {
+        assert.equal(entryId, 'alert', 'the form is addressed by Loader entry id')
+        return form
+      },
+    },
+    locale: {
+      register: (namespace, dict) => {
+        formDictionaries.push({ namespace, dict })
+        return () => undefined
+      },
+      bind: () => (key) => key,
+    },
+    slots: {
+      inject: (name, callback) => {
+        assert.equal(name, 'settings.general.item')
+        callback()
+      },
+      register: (options) => {
+        // Same registry face as the fixture above: the mounted instance's actions
+        // replace the declared store, and every `sync` is recorded.
+        const bound = {
+          sync: (state, revision) => {
+            rowBindings.push({ state: { ...state }, revision })
+          },
+        }
+        formSlots.push({ ...options, store: bound })
+        return () => undefined
+      },
+    },
+  }
+
+  const registeredEffects = effects.length
+  plugin.apply(formCtx)
+
+  assert.equal(formSlots.length, 1, 'the row must register against the 0.1.7 line')
+  assert.equal(formDictionaries.length, 1, 'the row copy must register too')
+
+  // The row's inject face is what binds the mounted instance's actions, and that
+  // is when the engine syncs it — so the stored document must arrive there.
+  const actions = formSlots[0].inject(formSlots[0].store)
+  assert.equal(
+    rowBindings.at(-1).state.style,
+    'title off',
+    'the stored document must reach the row',
+  )
+
+  // A document pushed by the Host repaints: the form subscription is live.
+  formValue = { style: 'title on' }
+  formListener()
+  assert.equal(
+    rowBindings.at(-1).state.style,
+    'title on',
+    'a document changed on the Host must reach the row through the subscription',
+  )
+
+  // And the row's writes land on the form.
+  actions.setField('style', 'icon off')
+  assert.deepEqual(formWrites[0], { op: 'set', field: 'style', value: 'icon off' })
+  actions.reset()
+  assert.deepEqual(formWrites.at(-1), { op: 'unset', field: 'style' })
+
   for (const dispose of effects.slice(registeredEffects).reverse()) dispose()
 }
 

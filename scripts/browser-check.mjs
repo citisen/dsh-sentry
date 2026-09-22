@@ -194,11 +194,13 @@ const CHECKLIST = `
         },
         on: () => undefined,
         get: () => undefined,
-        // The optional bind: this page's composition provides the service, so the
-        // plugin binds it exactly as it does against a real dsh.
+        // The optional bind: this page's composition provides the registered
+        // namespace scope (the 0.1.5-rc.x line) and no configuration form, so the
+        // plugin binds exactly as it does against that dsh — and the injection it
+        // cannot satisfy is skipped, as cordis would skip it.
         inject: (deps, callback) => {
-          callback(ctx)
-          return { dispose: () => undefined }
+          if (!deps.includes('settingsScope')) return { dispose: () => undefined }
+          return callback(ctx) ?? { dispose: () => undefined }
         },
         locale: { register: () => () => undefined, bind: () => (key) => key },
         settingsScope: settingsScopeService,

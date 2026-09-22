@@ -12,12 +12,12 @@
 
 「启用的条目却始终不激活」在 dsh 里算**启动失败**而不是警告：它会拒绝完成启动，而不是少个插件
 照常起来。三条出路，从快到慢，**三条都在 dsh 起不来的情况下可用**。本插件在 profile 里的行是
-`id: sentry`，对应 `name: '@citisen/dsh-sentry'`。
+`id: alert`，对应 `name: '@citisen/dsh-sentry'`。
 
 **1. 禁用它 —— 在 profile 自己的补丁层里加一条**
 （`$DSH_HOME/profiles/web/cordis.patch.yml`，这一层在所有 bundle 层之后应用）：
 
-    - id: sentry
+    - id: alert
       disabled: true
 
 不用敲命令、不用联网、不用装东西；删掉这两行它就回来了。`dsh --profile web --dump-config`
@@ -42,27 +42,42 @@
 
 ## 兼容性
 
-本构建面向 dsh **0.1.5-rc.x** 系列 —— 也就是当前的 `latest`（`0.1.5-rc.2`）和 `next`
-（`0.1.5-rc.3`）—— 同时也能在 `0.1.7-alpha.1` 上激活；那个版本改掉了它读的两个客户端界面。
-**那个版本唯一拿走的是设置**：样式文档读不到也存不下，于是 sentry 按出厂默认值工作，原因会打印
-在浏览器控制台和 dsh 日志里，而不是留给用户去猜。
+本构建在两条 dsh 线上都能跑：**0.1.5-rc.x** 系列（也就是当前的 `latest` 和 `next`），以及
+**0.1.7-alpha.1** —— 后者的设置模型它同样会说。两条线上，这份插件的 section 都叫同一个名字
+`alert`：0.1.7 线按 Loader 条目 id 定位设置，而本 bundle 的补丁正是以这个名字插入条目；
+0.1.5 线则把同一个名字注册为设置命名空间。
 
 | 它读什么 | 0.1.5-rc.x | 0.1.7-alpha.1 |
 | --- | --- | --- |
 | 某个会话在等你 | `uiSession.pendingInteractions` | `uiSession.sessionStatus`，其值里带 `pendingInteraction` |
-| 样式文档 | `settingsScope.bind({ namespace })` + 宿主 `settings.register()` | `configForms.get(entryId)` + Loader entry 的 `.volatile()` 字段 —— **尚未实现** |
+| 那份持久 section | `settingsScope.bind({ namespace: 'alert' })` | `configForms.get('alert')`，读条目自己的 `Config` |
+| 宿主契约 | `settings.register('alert', schema)` | 导出的 `Config`，字段标记为 `.volatile()` |
+
+两者都是**可选绑定**，所以两条服务都不提供的 dsh 也照样激活：插件不会一直 `pending`（那会直接
+阻断启动），也不会在激活时抛错。它按出厂默认值工作，而你在设置行上第一次动开关时，它会告诉你为
+什么存不下来。`0.1.1` 及更早的版本要求 0.1.5 那条服务，所以在 `0.1.7-alpha.1`
+上被报成「未激活」的条目；`0.1.2` 两条线都会说。
 
 等待/审批状态会按 dsh 实际提供的那一种形状去读，所以两条线上都会点亮标签页；这段映射由
 `npm run verify` 覆盖。两者都不提供的 dsh 只会被报告一次「看不见状态」，而不会让激活失败 ——
 失败的条目会直接阻断 web 启动。
 
-`0.1.0` 及更早的版本在 0.1.7 上根本不会激活：它一直等一个那个版本并不存在的服务，启动审计把它
-列为「未激活」的条目。`0.1.1` 在两条线上都能激活。**设置**那一项两边任一都能解决：把 dsh 钉住
-（`npx @deepseek-ai/dsh@0.1.5-rc.2 web`，或 `@next`），或者等一个会说 `configForms` 的版本。
+### 0.1.7 改名时丢掉的设置
 
-**如果存在 `$DSH_HOME/settings.yaml.imported`，不要删它。** dsh 0.1.7 会把旧的
-`settings.yaml` 导入一次并改名，凡是它不认的 section（包括本插件的 `alert`）都只留在改名后
-的文件里 —— 那个文件是那份样式文档的唯一副本。
+dsh 0.1.7 会把旧的 `$DSH_HOME/settings.yaml` 导入一次 —— 每个 section 写进同名条目 —— 并把文件
+改名为 `settings.yaml.imported`。在 `0.1.2` 之前，本插件的条目叫 `sentry`，于是
+`alert` 这个 section 无处可去，只留在改名后的文件里。现在名字对上了，dsh 自己的导入就能把
+这些值放回去：
+
+1. 把 `$DSH_HOME/settings.yaml.imported` **复制**成 `$DSH_HOME/settings.yaml`（是复制不是移动 ——
+   导入跑之前，那个文件是唯一的记录），并且只保留条目现在仍然声明的键：dsh 会用条目自己的 schema
+   校验这个 section，只要有一个不认识的键就整段拒绝，所以上面表格没列出的键都要删掉。旧的
+   `alert` section 里只有 `style` 能留下 —— `volume`、`fishScale`、`title`、`sound` 和
+   `doneWindowMs` 现在都是那份文档里的行。
+2. 用你平时用的 profile 启动一次 dsh 0.1.7。凡是现在有条目对应的 section —— 包括
+   `alert` —— 都会写进那个 profile 的 Cordis patch。
+3. dsh 仍然不认的 section 会被报告出来，并继续留在 `settings.yaml.imported` 里；所以**在你把需要
+   的东西取出来之前，别删那个文件**。
 
 **DeepSeek Harness Web 界面的标签页哨兵**：你在别的标签页时，它替你盯着所有会话，该你出手的时候叫你回来。
 
