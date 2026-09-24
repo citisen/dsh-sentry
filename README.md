@@ -122,7 +122,7 @@ that work while the page is in the background:
 | --- | --- |
 | Tab icon | The original fish, carved out of a coloured background: the colour and shape carry the state, the running fish turns, and a corner digit counts open questions |
 | Tab title | A prefix, so the exact counts can be read as text: `① Waiting · My session — DeepSeek Harness` |
-| Sound | A synthesized chime — rising two notes for a question, one note for an approval, a soft low note for a completion |
+| Sound | A synthesized chime — three public-domain classical phrases: a knock for a question, a descent for an approval, and a quiet resolution for a completion |
 
 All three are on by default — a notice nobody can discover is a notice nobody
 has — and each one is a line of the style document that turns it off: `icon off`,
@@ -164,16 +164,53 @@ document rather than a behaviour baked into the engine:
 
 | Event | Shipped sound |
 | --- | --- |
-| A question starts waiting | A5 → E6, two overlapping notes at the document's 50% (a real musical interval, not two arbitrary beeps) |
-| An approval starts waiting | One A5 note at its own 45% |
-| A session finishes | One A4 note at its own 25% — an octave down and deliberately quiet |
+| A question starts waiting | Beethoven's Fifth, op.67: `G G G Eb` — the fate motif, at the document's 50% |
+| An approval starts waiting | Bach's Toccata and Fugue in D minor, BWV 565: the held dominant and the descent that follows, at its own 45% |
+| A session finishes | Beethoven's Ninth: the "Ode to Joy" theme, low, at its own 25% |
+
+All three are public-domain phrases, and each was chosen for what its state means:
+a **knock at the door** because someone is waiting on you; a **grave descent**
+because a decision has to be made; a **quiet resolution** because a finished turn
+asks nothing of anyone. They are a `chime` line and two `tone`/`volume` lines —
+nothing about them is compiled in, so *Settings → General → Tab alerts* is where
+you replace them.
 
 `chime` takes note names — equal temperament from A4 = 440 — or frequencies in
 Hz, and plays them in order. Both spellings are the same sound; the names are
-just the one a musician can read. A chime is a chime: the stagger between two
-notes and the length of one note are the plugin's, not the document's, because a
-document that had to spell out a per-note envelope would be a synthesizer patch
-rather than a notification setting.
+just the one a musician can read. A note may name its own length in the
+document's duration spelling, after a colon:
+
+```
+chime A5 E6                        // two bare notes: 130ms each, 90ms apart, overlapping
+chime A5:200ms E6:200ms            // the same two notes, end to end
+chime A5:120ms -:80ms E6:240ms     // a rest, then a longer note
+```
+
+An item that names a length occupies exactly that long: it rings for it and the
+next item starts when it ends, which is what makes a written rhythm a rhythm. An
+item that names none keeps the shipped pacing — a 130ms note whose successor
+starts 90ms later — so every chime written before lengths existed sounds exactly
+as it did. `-` is a rest: silence that still takes time, written with a length
+like any note — and a chime of nothing but rests is the same silence `off` means.
+The shipped document writes every length out, which is what lets three classical
+phrases be three lines of text rather than three audio files.
+
+The waveform is a line too, in the same shape `volume` has — a document-level
+default, and a block's own for one state:
+
+```
+tone triangle                      // the default for every chimed state
+waiting { tone square }            // and this state's own, which replaces it
+```
+
+The four waveforms are Web Audio's own four — `sine`, `triangle`, `square`,
+`sawtooth`. Two of the three shipped phrases are written as `triangle`, which sits
+between the pure tone and the chiptune buzz; the completion says nothing, so it
+takes the shipped `sine` — the waveform a chime has always been here, and the mark
+its card carries is the `(default)` that says so. What the document does *not* own
+is the envelope: the short attack and the decay to silence stay the plugin's on
+every waveform, because an envelope is a synthesizer patch rather than a
+notification setting.
 
 `volume` appears twice, and it means one thing both times: a loudness. The
 top-level line is the default; a block's line overrides it for that state. It
@@ -183,7 +220,7 @@ marks *(default)* when neither line exists. That last sentence is a design this
 replaced: an earlier version paired a top-level master with a per-state factor
 whose numbers lived **in the plugin**, not in the document, so a reader who wrote
 `volume 1` saw `85%` on one card and `45%` on another and could not find either
-figure anywhere.
+figure anywhere. `tone` works the same way, with the same *(default)* mark.
 
 Three rules shape when it is allowed to make a sound, and all three are lines
 now:
@@ -202,9 +239,9 @@ now:
   not swallow the approval that arrives in the same burst, so a state with
   nothing to play is skipped rather than allowed to silence the event.
 
-A `chime` or a `volume` written in a `running` block is reported as a warning:
-a turn *starting* is not an event this plugin chimes on, and a property that
-does nothing should say so rather than be kept in silence.
+A `chime`, a `tone` or a `volume` written in a `running` block is reported as a
+warning: a turn *starting* is not an event this plugin chimes on, and a property
+that does nothing should say so rather than be kept in silence.
 
 ### The autoplay policy, stated plainly
 
@@ -253,7 +290,7 @@ one place to look for how the plugin behaves instead of two that can disagree.
 The editor grows with the document instead of scrolling inside itself: the page
 already scrolls, and a second scrollbar for one document is the wrong one to be
 reaching for. The bound that is left is for a pasted document hundreds of lines
-long, not a display decision — the shipped document (42 lines) is always fully
+long, not a display decision — the shipped document (45 lines) is always fully
 visible.
 
 Each preview card carries two buttons: **Play**, which sounds that state's chime,
@@ -268,9 +305,11 @@ The preview strip draws all four states through the same `sentryFavicon` and
 `motionTick` the tab uses, at the real 32px, on one shared 120 ms timer — and on
 no timer at all when everything in the document is still, since a settings page
 is not the place to hold four intervals open for a document that says `motion
-still`. Each card prints the chime its state will play (`A5 → E6 · volume 50%`,
-or *silent*): the notes and the loudness are the ones the reader resolved, so what
-is heard is what is printed.
+still`. Each card prints the chime its state will play (`G4:170ms → G4:170ms →
+G4:170ms → Eb4:680ms · volume 50% · tone triangle`, or *silent*): the notes, their
+lengths, the loudness and the waveform are the ones the reader resolved, so what is
+heard is what is printed. A phrase of eight notes makes that line long, which is
+the honest cost of a shipped melody: the card is a description, not a label.
 
 Anything the reader could not use is listed under the editor with the line number
 it is on. That list is not decoration — the editor's own squiggles are the version
@@ -288,11 +327,12 @@ it is the whole configuration. The appearance is four states, each a shape, a
 colour, a motion and a rate, plus a chime — and the interesting part is the
 combinations. A dozen switches could express that; they would also take a dozen
 interactions to say what one block says. So the document is the interface, and the
-shipped one is 538 characters:
+shipped one is 945 characters:
 
 ```
 // dsh-sentry: how each session state looks and sounds.
 // Durations are seconds unless a unit is written: 1.5s, 300ms, 2m.
+// Every chime is a public-domain classical phrase, chosen for what its state means.
 
 icon on
 title on
@@ -306,7 +346,8 @@ waiting {
   color amber
   motion blink
   speed 1.1s
-  chime A5 E6
+  chime G4:170ms G4:170ms G4:170ms Eb4:680ms // Beethoven, Symphony No.5 op.67 - the knock
+  tone triangle
 }
 
 approval {
@@ -314,7 +355,8 @@ approval {
   color amber
   motion blink
   speed 1.9s
-  chime A5
+  chime A5:350ms G5:95ms F5:95ms E5:95ms D5:95ms C#5:95ms D5:500ms // Bach, Toccata and Fugue in D minor, BWV 565
+  tone triangle
   volume 0.45
 }
 
@@ -330,7 +372,7 @@ done {
   color green
   motion pulse
   speed 1.6s
-  chime A4
+  chime E4:230ms E4:230ms F4:230ms G4:230ms G4:230ms F4:230ms E4:230ms D4:460ms // Beethoven, Symphony No.9 - Ode to Joy
   volume 0.25
 }
 ```
@@ -350,6 +392,7 @@ Top-level settings come first, one per line, before any block:
 | `chime-gap` | duration | The least time between two chimes |
 | `keep-done` | duration | How long "just finished" stays lit |
 | `volume` | 0–1 | The default loudness, for every chimed state whose own block does not name one |
+| `tone` | `sine` `triangle` `square` `sawtooth` | The default waveform, for every chimed state whose own block does not name one |
 
 Then one block per state, in urgency order — `waiting`, `approval`, `running`,
 `done` — with one **named** property per line:
@@ -360,7 +403,8 @@ Then one block per state, in urgency order — `waiting`, `approval`, `running`,
 | `color` | `blue` `amber` `green` `red` `purple` `gray` `dark` `light` | The background colour, from the preset palette |
 | `motion` | `still` `turn` `blink` `pulse` | What moves while the state lasts |
 | `speed` | duration | The rate: seconds per revolution for `turn`, per cycle for `pulse`, per breath for `blink` |
-| `chime` | note names, frequencies, or `off` | The notes this state sounds, in order; `off` silences this state alone |
+| `chime` | note names, frequencies, `note:length`, `-:length` rests, or `off` | The notes this state sounds, in order. A note or rest that names a length occupies exactly that long and the next item starts when it ends; one that names none keeps the shipped pacing. `off` silences this state alone |
+| `tone` | `sine` `triangle` `square` `sawtooth` | This state's own waveform, overriding the document's default — it replaces that word rather than mixing with it; with neither written the shipped `sine` applies and the card says so |
 | `volume` | 0–1 | This state's own loudness, overriding the document's default — it replaces that number rather than scaling it; with neither written the shipped 0.5 applies and the card says so |
 
 Every property is named, and that is the whole point of the shape: there is no
@@ -522,7 +566,7 @@ Five checks in five places, each one covering what the one before it cannot:
 | --- | --- | --- |
 | `verify-host.mjs` | Node, stubbed | The host half on its own: that the namespace is `alert` and not a reserved `ui-*` one, that the roster is exactly `['style']`, that the schema resolves the shipped document, and that a hand-edited `settings.yaml` cannot put a number, a list or a boolean where the text belongs. Also that `apply()` is a no-op rather than a throw when no settings provider is composed |
 | `verify-settings.mjs` | Node, real dsh services | The namespace contract the interface depends on: that the real settings service accepts `alert`, that it applies `live`, and — the failure this one exists for — that the value the **host** resolves and the defaults the **browser half** falls back to are the same value, document included, byte for byte. They live in bundles that cannot share a module, so a default changed on one side only would render one setting and enforce another |
-| `verify-client.mjs` | Node, stubbed | Every pure decision: the state precedence, the completion edge, the icon geometry, the title composition, the sound gating, the settings row, and `apply()` end to end against stub services. Since the rewrite it also covers the document: the shared reader — the engine and the grammar are run over the same broken text and must report the same problems — the note names and the duration syntax, the grammar the editor is written against (its paint, its diagnostics and its completions), the four previews at the size and with the sound the row prints, and the problems list under the editor |
+| `verify-client.mjs` | Node, stubbed | Every pure decision: the state precedence, the completion edge, the icon geometry, the title composition, the sound gating, the settings row, and `apply()` end to end against stub services. Since the rewrite it also covers the document: the shared reader — the engine and the grammar are run over the same broken text and must report the same problems — the note names, the per-note lengths, the rests and the duration syntax, the grammar the editor is written against (its paint, its diagnostics and its completions), the waveforms, the four previews at the size and with the sound the row prints, and the problems list under the editor |
 | `browser-check.mjs` | Headless Chrome | The things a stub cannot judge: whether the browser **decodes** the favicon data URL (an unencoded `#` truncates it into half a fish, with no error anywhere), whether the DOM contract holds (its own `<link>` appended to the head, the app's link left alone, its own element removed), whether the `MutationObserver` title guard survives the browser's own scheduling, whether a settings write really repaints the icon, and whether a preview really reaches the tab |
 | `verify-profile.mjs` | Node, real dsh profile | That the loader actually composes this bundle: the `cordis.patch.yml` row resolves, `dsh.profile.bundles` carries it, and the browser roster can find and serve `lib/client.js` |
 

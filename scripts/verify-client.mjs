@@ -19,7 +19,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { complete, inspect, scan } from '@citisen/litearea'
+import { complete, inspect, resolveHover, scan } from '@citisen/litearea'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const bundlePath = resolve(process.argv[2] ?? join(root, 'lib', 'client.js'))
@@ -578,12 +578,104 @@ function placement(scale) {
   assert.equal(plugin.noteFrequency('H9'), undefined)
   const chime = plugin.resolveStyle('waiting {\n  chime A5 E6\n}').sound.channels.waiting
   assert.deepEqual(chime.labels, ['A5', 'E6'], 'the labels are kept for the row to print')
-  assert.equal(chime.frequencies[0], 880)
-  assert.ok(chime.frequencies[1] > chime.frequencies[0], 'the pair rises')
+  assert.equal(chime.notes[0].frequency, 880)
+  assert.ok(chime.notes[1].frequency > chime.notes[0].frequency, 'the pair rises')
   assert.equal(
-    plugin.resolveStyle('waiting {\n  chime 880 1318.5\n}').sound.channels.waiting.frequencies[0],
+    plugin.resolveStyle('waiting {\n  chime 880 1318.5\n}').sound.channels.waiting.notes[0].frequency,
     880,
     'a frequency in Hz is a note too',
+  )
+
+  // ── lengths and rests ─────────────────────────────────────────────────────
+  // An item that names a length is placed by the writer: it rings that long and the
+  // next item starts when it ends, which is what makes a line of them a rhythm. An
+  // item that names none keeps the shipped pacing — the note and the overlap — so
+  // every chime written before this spelling existed sounds exactly as it did.
+  const placed = plugin.resolveStyle('waiting {\n  chime A5:200ms E6:200ms\n}').sound.channels.waiting
+  assert.deepEqual(placed.labels, ['A5:200ms', 'E6:200ms'], 'the card prints the length that was written')
+  assert.deepEqual(
+    plugin.chimeNotes(placed.notes),
+    [
+      { frequency: 880, startMs: 0, durationMs: 200 },
+      { frequency: 1318.51, startMs: 200, durationMs: 200 },
+    ],
+    'a written length is both how long the note rings and when the next one starts',
+  )
+  const rested = plugin.resolveStyle('waiting {\n  chime A5 -:100ms E6\n}').sound.channels.waiting
+  assert.deepEqual(
+    plugin.chimeNotes(rested.notes).map((note) => note.startMs),
+    [0, 190],
+    'a rest moves the clock without sounding: 90ms of the bare note, then 100ms of silence',
+  )
+  assert.equal(
+    plugin.chimeNotes(rested.notes).length,
+    2,
+    'and the rest itself is not a note to schedule',
+  )
+  assert.equal(
+    plugin.resolveStyle('waiting {\n  chime 880:0.4s\n}').sound.channels.waiting.notes[0].lengthMs,
+    400,
+    'a frequency takes a length in the document\u2019s own duration spelling',
+  )
+  // Rests alone cannot sound, and the language already has a word for silence: a
+  // channel that exists is a card with a Play button, so this one resolves to `off`
+  // rather than to a chime that never plays.
+  const allRests = plugin.resolveStyle('waiting {\n  chime -:200ms\n}')
+  assert.deepEqual(allRests.problems, [], 'a chime of rests is legible rather than a mistake')
+  assert.equal(allRests.sound.channels.waiting, undefined, 'and it is the silence `off` already means')
+
+  // A bad length and a bad note are different mistakes, and each says which half of
+  // the item it is about.
+  const badLength = plugin.resolveStyle('waiting {\n  chime A5:soon\n}')
+  assert.equal(badLength.problems[0]?.code, 'bad-value')
+  assert.match(badLength.problems[0]?.message ?? '', /length/)
+  assert.deepEqual(
+    badLength.sound.channels.waiting.notes,
+    plugin.DEFAULT_CHIME.waiting.notes,
+    'and the state falls back to the shipped chime rather than to half a line',
+  )
+  assert.match(
+    plugin.resolveStyle('waiting {\n  chime H5:200ms\n}').problems[0]?.message ?? '',
+    /is not a note/,
+  )
+  assert.match(
+    plugin.resolveStyle('waiting {\n  chime A5:90s\n}').problems[0]?.message ?? '',
+    /length/,
+    'a length outside the accepted range is reported as a length',
+  )
+
+  // ── tone ──────────────────────────────────────────────────────────────────
+  // The waveform is a line of the document in the same shape `volume` is: a
+  // document-level default, a block override, and a shipped constant the card marks
+  // as the default rather than printing a number nobody wrote.
+  assert.deepEqual(plugin.CHIME_TONES, ['sine', 'triangle', 'square', 'sawtooth'])
+  const plainTone = plugin.resolveStyle('waiting {\n  chime A5\n}').sound.channels.waiting
+  assert.equal(plainTone.tone, plugin.DEFAULT_TONE)
+  assert.equal(plainTone.toneUnstated, true, 'nothing wrote a waveform, and the row is told so')
+  assert.equal(plugin.resolveStyle('tone square').sound.channels.waiting.tone, 'square', 'the document sets the default')
+  assert.equal(
+    plugin.resolveStyle('tone square\nwaiting {\n  tone triangle\n}').sound.channels.waiting.tone,
+    'triangle',
+    'a block replaces it rather than layering on it',
+  )
+  assert.equal(
+    plugin.resolveStyle('tone square\nwaiting {\n  tone triangle\n}').sound.channels.done.tone,
+    'square',
+    'and a block that overrides only touches its own state',
+  )
+  assert.equal(
+    plugin.resolveStyle('waiting {\n  tone triangle\n}').sound.channels.waiting.toneUnstated,
+    false,
+    'a written waveform is not marked as the default',
+  )
+  const badTone = plugin.resolveStyle('waiting {\n  tone sinewave\n}')
+  assert.equal(badTone.problems[0]?.code, 'bad-value')
+  assert.equal(badTone.sound.channels.waiting.tone, plugin.DEFAULT_TONE, 'a refused waveform falls back')
+  assert.ok(
+    plugin
+      .resolveStyle('running {\n  tone square\n}')
+      .problems.some((problem) => problem.code === 'inert-property'),
+    'a waveform in a state with no event is reported as inert, like chime and volume',
   )
 
   // `off` removes the channel outright, and the states either side keep theirs: one
@@ -621,7 +713,7 @@ function placement(scale) {
   assert.deepEqual(commented.problems, [])
   assert.equal(commented.look.running.color, 'red')
   assert.equal(
-    plugin.resolveStyle('waiting {\n  chime C#4\n}').sound.channels.waiting.frequencies[0],
+    plugin.resolveStyle('waiting {\n  chime C#4\n}').sound.channels.waiting.notes[0].frequency,
     plugin.noteFrequency('C#4'),
     'a sharp is a note rather than the start of a comment',
   )
@@ -720,6 +812,7 @@ function placement(scale) {
     colors: plugin.PRESET_COLORS,
     modes: plugin.MODES,
     notes: ['A3', 'C4', 'E4', 'A4', 'C5', 'E5', 'A5', 'E6'],
+    tones: plugin.CHIME_TONES,
     defaults: plugin.DEFAULT_LOOK,
   })
 
@@ -756,7 +849,10 @@ function placement(scale) {
     ['speed', 'property'],
     ['1.1s', 'value.number'],
     ['chime', 'property'],
-    ['A5', 'value.note'],
+    ['G4:170ms', 'value.note'],
+    ['Eb4:680ms', 'value.note'],
+    ['tone', 'property'],
+    ['triangle', 'value.tone'],
     ['icon', 'property'],
     ['on', 'value.mode'],
     ['sound', 'property'],
@@ -773,6 +869,36 @@ function placement(scale) {
     painted.filter((token) => token.text.trim() !== '' && token.scope === 'invalid').length,
     0,
     'nothing in the shipped document is painted as a mistake',
+  )
+
+  // A note that names its length, and a rest, are each one token — which is the
+  // point of the colon being a word character: the reader treats `A5:200ms` as one
+  // value, so the editor has to treat it as one word, or a completion would replace
+  // half of it and leave the length stranded. A waveform is painted by its own
+  // vocabulary, like every other closed value.
+  const spelled = scan('waiting {\n  chime A5:200ms -:100ms\n  tone square\n}', grammar).tokens
+  const scopeIn = (word) => spelled.find((token) => token.text === word)?.scope
+  assert.equal(scopeIn('A5:200ms'), 'value.note', 'a note and its length are one value')
+  assert.equal(scopeIn('-:100ms'), 'value.note', 'and so is a rest and its length')
+  assert.equal(scopeIn('tone'), 'property')
+  assert.equal(scopeIn('square'), 'value.tone', 'a waveform paints under the tone vocabulary')
+  assert.deepEqual(
+    inspect('waiting {\n  chime A5:200ms -:100ms\n  tone square\n}', grammar).diagnostics,
+    [],
+    'and every spelling a document may write is one the editor accepts without a word',
+  )
+  assert.equal(scopeIn(':'), undefined, 'the colon does not become a token of its own')
+  /** @param text - the document. @param word - the word to hover. @returns its tooltip. */
+  const describeToken = (text, word) => resolveHover(inspect(text, grammar), grammar, text.indexOf(word) + 1)
+  assert.equal(
+    describeToken('waiting {\n  chime A5:200ms\n}', 'A5:200ms')?.body?.includes('200ms'),
+    true,
+    'the hover names the length the note was given',
+  )
+  assert.equal(
+    describeToken('waiting {\n  chime -:100ms\n}', '-:100ms')?.detail,
+    'a rest',
+    'and a rest explains itself as silence rather than as a note',
   )
 
   // ── the diagnostics, and where they point ─────────────────────────────────
@@ -847,7 +973,19 @@ function placement(scale) {
   assert.deepEqual(rowsAt('sound ', 6), ['off', 'background', 'always'], 'and sound takes its three modes')
   const chimeRows = rowsAt('waiting {\n  chime ', 18)
   assert.ok(chimeRows.includes('A5'), 'the chime list offers notes')
+  assert.ok(chimeRows.includes('-'), 'and the rest, which is how a chime gets a gap')
   assert.equal(chimeRows.at(-1), 'off', 'and the way to silence this state alone')
+  assert.deepEqual(rowsAt('waiting {\n  tone ', 17), plugin.CHIME_TONES, 'a waveform value leads with the waveforms')
+  assert.ok(!rowsAt('waiting {\n  tone ', 17).includes('off'), 'and a waveform is not a switch')
+  assert.equal(
+    complete(inspect('waiting {\n  chime ', grammar), grammar, {
+      text: 'waiting {\n  chime ',
+      caret: 18,
+      trigger: 'explicit',
+    }).rows.find((row) => row.item.label === '-')?.item.insert,
+    '-:',
+    'accepting a rest writes the colon, because the length is the point of a rest',
+  )
   assert.ok(rowsAt('keep-done ', 10).length > 0, 'and a duration offers the values worth reaching for')
 
   // ── what accepting a row actually replaces ────────────────────────────────
@@ -924,6 +1062,7 @@ function placement(scale) {
     colors: { teal: '#008080' },
     modes: plugin.MODES,
     notes: [],
+    tones: [],
     defaults: {},
   })
   assert.deepEqual(
@@ -1079,8 +1218,8 @@ const SHIPPED_SOUND = plugin.resolveStyle(plugin.DEFAULT_STYLE).sound
   const picked = plugin.soundPlan(ALERTS, SHIPPED_SOUND, BACKGROUND)
   assert.equal(picked?.channel, 'waiting', 'a question is the loudest thing')
   assert.deepEqual(
-    picked.frequencies,
-    SHIPPED_SOUND.channels.waiting.frequencies,
+    picked.notes,
+    SHIPPED_SOUND.channels.waiting.notes,
     'and what plays is what the document asked for',
   )
   assert.equal(picked.gain, SHIPPED_SOUND.channels.waiting.gain, 'at the loudness the document resolved to')
@@ -1144,15 +1283,55 @@ const SHIPPED_SOUND = plugin.resolveStyle(plugin.DEFAULT_STYLE).sound
 }
 
 {
-  // The shipped chimes are the plugin's audible identity: a rising two-note question,
-  // one note for an approval, one soft low note for a completion.
+  // The shipped chimes are the plugin's audible identity: three public-domain
+  // classical phrases, one per state, each chosen for what the state means.
   const channels = SHIPPED_SOUND.channels
-  assert.deepEqual(channels.waiting.labels, ['A5', 'E6'], 'a question rises a fifth')
-  assert.ok(channels.waiting.frequencies[1] > channels.waiting.frequencies[0])
-  assert.deepEqual(channels.approval.labels, ['A5'])
-  assert.deepEqual(channels.done.labels, ['A4'], 'a completion is the same note an octave down')
+  assert.deepEqual(
+    channels.waiting.labels,
+    ['G4:170ms', 'G4:170ms', 'G4:170ms', 'Eb4:680ms'],
+    'a question is the fate motif',
+  )
+  assert.ok(
+    channels.waiting.notes[3].frequency < channels.waiting.notes[2].frequency,
+    'and it ends a minor third down, which is the whole gesture',
+  )
+  assert.deepEqual(
+    channels.approval.labels,
+    ['A5:350ms', 'G5:95ms', 'F5:95ms', 'E5:95ms', 'D5:95ms', 'C#5:95ms', 'D5:500ms'],
+    'an approval is the toccata: a held dominant, then a descent',
+  )
+  assert.ok(
+    channels.approval.notes[6].lengthMs > channels.approval.notes[1].lengthMs,
+    'and it comes to rest on the last note rather than running on',
+  )
+  assert.deepEqual(
+    channels.done.labels,
+    ['E4:230ms', 'E4:230ms', 'F4:230ms', 'G4:230ms', 'G4:230ms', 'F4:230ms', 'E4:230ms', 'D4:460ms'],
+    'a completion is the Ode to Joy phrase',
+  )
   assert.ok(channels.done.gain < channels.waiting.gain, 'and quieter than a question')
   assert.ok(channels.done.gain < channels.approval.gain, 'and quieter than an approval')
+  assert.equal(channels.waiting.tone, 'triangle', 'the two urgent states are written as triangle')
+  assert.equal(channels.approval.tone, 'triangle')
+  assert.equal(
+    channels.done.tone,
+    plugin.DEFAULT_TONE,
+    'and the completion takes the shipped waveform by saying nothing, so the document shows that path',
+  )
+
+  // The fallback chime a state plays when the document names none is the shipped
+  // document's own, read out of it rather than written beside it: two copies of one
+  // decision is how a deleted line silently changes a sound.
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(plugin.DEFAULT_CHIME).map(([state, chime]) => [state, chime.labels])),
+    Object.fromEntries(Object.entries(channels).map(([state, channel]) => [state, channel.labels])),
+    'the fallback chime is the shipped document\u2019s own',
+  )
+  assert.equal(
+    Object.values(plugin.DEFAULT_CHIME).every((chime) => chime.notes.length > 0),
+    true,
+    'and every chimed state has one, which is what makes the empty fallback unreachable',
+  )
 
   // Loudness is one number per state, so what the card prints is what plays: the
   // shipped document's three numbers, and nothing derived from a second setting.
@@ -1170,14 +1349,26 @@ const SHIPPED_SOUND = plugin.resolveStyle(plugin.DEFAULT_STYLE).sound
     'without touching the states beside it',
   )
 
-  // The notes of one chime are a sequence rather than a chord: the second starts
-  // after the first, which is what makes two notes read as one sound.
-  const notes = plugin.chimeNotes(channels.waiting.frequencies)
-  assert.equal(notes.length, 2)
-  assert.equal(notes[0].startMs, 0)
-  assert.equal(notes[1].startMs, plugin.CHIME_STAGGER_MS)
-  assert.equal(notes[0].durationMs, plugin.CHIME_NOTE_MS)
-  assert.ok(plugin.CHIME_STAGGER_MS < plugin.CHIME_NOTE_MS, 'so the two notes overlap rather than sequence')
+  // The shipped document's own phrases are placed by the lengths it writes: no
+  // overlap, each item occupying exactly what it says. What still comes from the
+  // engine is the pacing of an item that names *no* length — a 130ms note whose
+  // successor starts 90ms later — which is what every chime written before lengths
+  // existed relies on, so the two are asserted apart.
+  const notes = plugin.chimeNotes(channels.waiting.notes)
+  assert.deepEqual(
+    notes,
+    [
+      { frequency: 392, startMs: 0, durationMs: 170 },
+      { frequency: 392, startMs: 170, durationMs: 170 },
+      { frequency: 392, startMs: 340, durationMs: 170 },
+      { frequency: 311.13, startMs: 510, durationMs: 680 },
+    ],
+    'the knock: three short Gs, then the Eb held',
+  )
+  const bare = plugin.chimeNotes(plugin.resolveStyle('waiting {\n  chime A5 E6\n}').sound.channels.waiting.notes)
+  assert.equal(bare[1].startMs, plugin.CHIME_STAGGER_MS, 'a note that names no length keeps the shipped stagger')
+  assert.equal(bare[0].durationMs, plugin.CHIME_NOTE_MS, 'and the shipped note length')
+  assert.ok(plugin.CHIME_STAGGER_MS < plugin.CHIME_NOTE_MS, 'so two bare notes overlap rather than sequence')
   assert.deepEqual(plugin.chimeNotes([]), [], 'no notes is no sound')
 }
 
@@ -1205,7 +1396,14 @@ const SHIPPED_SOUND = plugin.resolveStyle(plugin.DEFAULT_STYLE).sound
       },
       createOscillator() {
         return {
-          type: 'sine',
+          // A setter rather than a field, so the waveform the player chose is one of
+          // the scheduled facts this fake can be asserted against.
+          set type(value) {
+            scheduled.push(['type', value])
+          },
+          get type() {
+            return 'sine'
+          },
           frequency: { setValueAtTime: (value, at) => scheduled.push(['frequency', value, at]) },
           connect: () => undefined,
           start: (at) => scheduled.push(['start', at]),
@@ -1233,7 +1431,7 @@ const SHIPPED_SOUND = plugin.resolveStyle(plugin.DEFAULT_STYLE).sound
     },
   })
   assert.equal(
-    blocked.play(SHIPPED_SOUND.channels.waiting.frequencies, 0.5),
+    blocked.play(SHIPPED_SOUND.channels.waiting),
     false,
     'a suspended context cannot sound, and the chime is dropped',
   )
@@ -1246,29 +1444,56 @@ const SHIPPED_SOUND = plugin.resolveStyle(plugin.DEFAULT_STYLE).sound
       return running.context
     },
   })
-  assert.equal(player.play(SHIPPED_SOUND.channels.waiting.frequencies, 0.25), true)
+  // A two-note chime that names no lengths schedules two notes at the shipped
+  // stagger; the shipped document's own phrase is scheduled from the lengths it
+  // writes, which is the other path and is asserted above.
+  const twoNotes = { notes: [{ frequency: 880 }, { frequency: 1318.51 }], gain: 0.25 }
+  assert.equal(player.play(twoNotes), true)
   const starts = running.scheduled.filter((entry) => entry[0] === 'start')
   assert.equal(starts.length, 2, 'a two-note chime schedules two notes')
   assert.ok(
     Math.abs(starts[1][1] - starts[0][1] - plugin.CHIME_STAGGER_MS / 1000) < 0.001,
     `the second note is offset by the chime's own stagger (${String(starts[1][1] - starts[0][1])})`,
   )
-  const attack = running.scheduled.find((entry) => entry[0] === 'attack')
-  assert.equal(attack[1], 0.25, 'the gain is the loudness the caller asked for')
-  assert.equal(player.play(SHIPPED_SOUND.channels.done.frequencies, 0.1), true)
+  assert.equal(
+    running.scheduled.find((entry) => entry[0] === 'attack')[1],
+    0.25,
+    'the gain is the loudness the caller asked for',
+  )
+  assert.equal(player.play({ ...SHIPPED_SOUND.channels.waiting, gain: 0.1 }), true)
+  assert.equal(
+    running.scheduled.filter((entry) => entry[0] === 'start').length,
+    2 + SHIPPED_SOUND.channels.waiting.notes.length,
+    'the shipped phrase schedules one oscillator per note it names',
+  )
   assert.equal(
     running.scheduled.filter((entry) => entry[0] === 'attack').at(-1)[1],
     0.1,
     'and a quieter state plays quieter',
   )
-  assert.equal(player.play([], 0.5), false, 'an empty note list schedules nothing')
-  assert.equal(player.play(undefined, 0.5), false, 'and so does no note list at all')
+  assert.equal(player.play({ notes: [] }), false, 'an empty note list schedules nothing')
+  assert.equal(player.play(undefined), false, 'and so does no channel at all')
+
+  const square = { notes: [{ frequency: 880 }], gain: 0.5, tone: 'square' }
+  assert.equal(player.play(square), true, 'a channel names its own waveform and it plays')
+  const waves = () => running.scheduled.filter((entry) => entry[0] === 'type').map((entry) => entry[1])
+  assert.equal(waves().at(-1), 'square', 'the waveform is the one the channel named')
+  assert.equal(
+    player.play({ notes: [{ frequency: 880 }], gain: 0.5, tone: 'noise' }),
+    true,
+    'an unknown waveform is not a reason to stay silent',
+  )
+  assert.equal(
+    waves().at(-1),
+    plugin.DEFAULT_TONE,
+    'and it falls back to the shipped tone rather than throwing inside the audio graph',
+  )
   player.dispose()
   assert.equal(running.counts().closed, 1)
 
   // No Web Audio at all: the plugin degrades to the visual channels, silently.
   const silent = plugin.createChime({ AudioContextClass: undefined })
-  assert.equal(silent.play([880], 0.5), false)
+  assert.equal(silent.play({ notes: [{ frequency: 880 }] }), false)
   silent.resume()
   silent.dispose()
 }
@@ -1428,7 +1653,7 @@ function byClass(tree, className) {
     reset: () => {
       resets += 1
     },
-    audition: (frequencies, gain) => auditions.push([frequencies, gain]),
+    audition: (channel) => auditions.push(channel),
     preview: (name) => shownInTab.push(name),
   })
   const doc = plugin.resolveStyle(plugin.DEFAULT_STYLE)
@@ -1471,7 +1696,7 @@ function byClass(tree, className) {
   // The sound line and the button describe and play the same chime: the notes the
   // document named, at the loudness it resolved to.
   const sounds = byClass(previews, 'dsh-sentry-previewSound').map((element) => element.children.join(''))
-  assert.ok(sounds.some((text) => text.includes('A5')), 'the waiting card names its notes')
+  assert.ok(sounds.some((text) => text.includes('G4')), 'the waiting card names its notes')
   assert.ok(sounds.some((text) => text.includes('50%')), 'and the loudness that will come out')
   assert.ok(sounds.some((text) => text.includes('alert.preview.silent')), 'a state with no chime says so')
   // Every percentage the strip prints is a number the document contains. That is the
@@ -1500,14 +1725,35 @@ function byClass(tree, className) {
   )
   assert.ok(
     byClass(sparse, 'dsh-sentry-previewSound')[0].children.join('').includes('alert.preview.fallback'),
-    'a loudness the document never states is printed as the default',
+    'a loudness and a waveform the document never states are printed as the default',
   )
   const buttons = byClass(previews, 'dsh-sentry-audition')
   assert.equal(buttons.length, Object.keys(doc.sound.channels).length, 'only a chimed state offers a button')
   buttons[0].props.onClick()
   assert.equal(auditions.length, 1)
-  assert.deepEqual(auditions[0][0], doc.sound.channels.waiting.frequencies)
-  assert.equal(auditions[0][1], doc.sound.channels.waiting.gain)
+  assert.deepEqual(
+    auditions,
+    [doc.sound.channels.waiting],
+    'the card hands the audition the channel it printed, so the two cannot disagree',
+  )
+
+  // The waveform is on the card for the same reason the percentage is: a reader who
+  // writes `tone square` has to be able to see that the line took effect.
+  const tuned = rendered(
+    plugin.AlertRow({
+      t: (key) => key,
+      useStore: (selector) =>
+        selector({ ...settings, style: 'waiting {\n  tone square\n}', revision: 1 }),
+      setField: () => undefined,
+      reset: () => undefined,
+      audition: () => undefined,
+      preview: () => undefined,
+    }),
+    'StatePreviews',
+  )
+  const tunedSound = byClass(tuned, 'dsh-sentry-previewSound')[0].children.join('')
+  assert.ok(tunedSound.includes('alert.preview.tone'), 'the card labels the waveform')
+  assert.ok(tunedSound.includes('square'), 'and prints the one the document named')
 
   // ── showing a state in the tab ────────────────────────────────────────────
   // The card is a 32-pixel picture in a settings page; the button beside it puts the

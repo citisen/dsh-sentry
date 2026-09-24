@@ -309,23 +309,40 @@ const PRESET_COLORS = {
 const STYLE_STATES = ['waiting', 'approval', 'running', 'done']
 
 /** The properties a block accepts, in the order the reference lists them. */
-const STYLE_STATE_KEYS = ['shape', 'color', 'motion', 'speed', 'chime', 'volume']
+const STYLE_STATE_KEYS = ['shape', 'color', 'motion', 'speed', 'chime', 'tone', 'volume']
 
 /** The document-level settings, in the order the reference lists them. */
-const STYLE_GLOBAL_KEYS = ['icon', 'title', 'sound', 'chime-gap', 'keep-done', 'volume']
+const STYLE_GLOBAL_KEYS = ['icon', 'title', 'sound', 'chime-gap', 'keep-done', 'volume', 'tone']
 
 /**
  * The states something can be *said* about.
  *
  * Three of the four states have an event behind them — a question arrives, an
  * approval arrives, a turn ends — and `running` has none: a turn starting is not
- * something this plugin interrupts anyone for. A `chime` or a `volume` written in
- * a `running` block is therefore reported as inert rather than kept in silence.
+ * something this plugin interrupts anyone for. A `chime`, a `tone` or a `volume`
+ * written in a `running` block is therefore reported as inert rather than kept in
+ * silence.
  */
 const CHIME_STATES = ['waiting', 'approval', 'done']
 
 /** The note names a `chime` completion offers. Any equal-tempered name is accepted. */
 const STYLE_NOTE_SUGGESTIONS = ['A3', 'C4', 'E4', 'A4', 'C5', 'E5', 'A5', 'E6']
+
+/**
+ * The waveforms a `tone` line may name: the four an `OscillatorNode` has, spelled
+ * the way Web Audio spells them, so a document reads like the audio graph it is.
+ */
+const CHIME_TONES = ['sine', 'triangle', 'square', 'sawtooth']
+
+/**
+ * The waveform a chimed state plays when nothing in the document says otherwise.
+ *
+ * Sine because that is what every shipped chime has always been: a pure tone at a
+ * low volume is a notification, and the harmonics of the other three are what turn
+ * one into an alarm. It is a constant in the same sense `DEFAULT_VOLUME` is — the
+ * row marks it as the default rather than printing a waveform nobody wrote.
+ */
+const DEFAULT_TONE = 'sine'
 
 /** The slowest and fastest motion rate a document may name, in seconds per cycle. */
 const SPEED_MIN = 0.2
@@ -367,6 +384,7 @@ const STYLE_SPEC = {
   motion: { kind: 'word', words: MOTIONS },
   speed: { kind: 'duration', min: SPEED_MIN, max: SPEED_MAX, suggest: ['0.5s', '1s', '1.5s', '2s', '3s', '5s'] },
   chime: { kind: 'chime', states: CHIME_STATES },
+  tone: { kind: 'word', words: CHIME_TONES, states: CHIME_STATES },
   volume: { kind: 'number', min: 0, max: 1, states: CHIME_STATES, suggest: ['0', '0.25', '0.5', '0.75', '1'] },
 }
 
@@ -375,12 +393,22 @@ const STYLE_DOCUMENT_OPTIONS = {
   states: STYLE_STATES,
   keys: { global: STYLE_GLOBAL_KEYS, state: STYLE_STATE_KEYS },
   spec: STYLE_SPEC,
+  tones: CHIME_TONES,
 }
 
-/** What an unconfigured install draws and plays. */
+/**
+ * What an unconfigured install draws and plays.
+ *
+ * The chimes are public-domain classical phrases, one per state, chosen for what the
+ * state means: a knock at the door for a question, the grave descent of the D-minor
+ * Toccata for an approval, and the "Ode to Joy" theme — low, quiet — for a finished
+ * turn. `lib/index.js` carries the same lines for the host half, and the gate compares
+ * the two copies character for character.
+ */
 const DEFAULT_STYLE = [
   '// dsh-sentry: how each session state looks and sounds.',
   '// Durations are seconds unless a unit is written: 1.5s, 300ms, 2m.',
+  '// Every chime is a public-domain classical phrase, chosen for what its state means.',
   '',
   'icon on',
   'title on',
@@ -394,7 +422,8 @@ const DEFAULT_STYLE = [
   '  color amber',
   '  motion blink',
   '  speed 1.1s',
-  '  chime A5 E6',
+  '  chime G4:170ms G4:170ms G4:170ms Eb4:680ms // Beethoven, Symphony No.5 op.67 - the knock',
+  '  tone triangle',
   '}',
   '',
   'approval {',
@@ -402,7 +431,8 @@ const DEFAULT_STYLE = [
   '  color amber',
   '  motion blink',
   '  speed 1.9s',
-  '  chime A5',
+  '  chime A5:350ms G5:95ms F5:95ms E5:95ms D5:95ms C#5:95ms D5:500ms // Bach, Toccata and Fugue in D minor, BWV 565',
+  '  tone triangle',
   '  volume 0.45',
   '}',
   '',
@@ -418,7 +448,7 @@ const DEFAULT_STYLE = [
   '  color green',
   '  motion pulse',
   '  speed 1.6s',
-  '  chime A4',
+  '  chime E4:230ms E4:230ms F4:230ms G4:230ms G4:230ms F4:230ms E4:230ms D4:460ms // Beethoven, Symphony No.9 - Ode to Joy',
   '  volume 0.25',
   '}',
 ].join('\n')
@@ -465,17 +495,27 @@ const DEFAULT_LOOK = {
 }
 
 /**
- * The shipped chime per state, before any document is applied.
+ * The shipped chime per state, read out of the shipped document rather than written
+ * beside it.
  *
- * The notes only, deliberately. A state's loudness is a `volume` line — the document's
- * default or its own block's — and keeping a third set of numbers here is how the row
- * came to print figures that were in no document at all.
+ * A state plays this when the document names no chime for it — one line deleted, a
+ * whole block removed, or no document at all — so it has to be the same sound the
+ * shipped document asks for, or deleting a line would quietly swap a classical phrase
+ * for something the reader never saw. It used to be a hand-written frequency list
+ * here, which is the same species of mistake as the per-state factors an earlier
+ * version kept in the engine: two copies of one decision, and only one of them on
+ * screen. Reading the document costs one parse at load and makes the copies one.
+ *
+ * `?? { labels: [], notes: [] }` covers a state the shipped document does not chime,
+ * which the suite asserts never happens for the three chimed states.
  */
-const DEFAULT_CHIME = {
-  waiting: { labels: ['A5', 'E6'], frequencies: [880, 1318.51] },
-  approval: { labels: ['A5'], frequencies: [880] },
-  done: { labels: ['A4'], frequencies: [440] },
-}
+const SHIPPED_CHIMES = readStyleDocument(DEFAULT_STYLE, STYLE_DOCUMENT_OPTIONS).rules
+const DEFAULT_CHIME = Object.fromEntries(
+  CHIME_STATES.map((state) => [
+    state,
+    SHIPPED_CHIMES[state]?.chime ?? { labels: [], notes: [] },
+  ]),
+)
 
 /** The shipped document-level settings. */
 const DEFAULT_GLOBALS = {
@@ -514,7 +554,9 @@ function resolveGlobals(written) {
  * product of the two**: both spellings are the same kind of number, so the percentage
  * the row prints is always one a reader can find by reading the document. `unstated`
  * marks the single case where that is not true — no `volume` anywhere — and the row
- * says so rather than printing a figure with no source.
+ * says so rather than printing a figure with no source. `tone` and `toneUnstated` are
+ * the same pair for the waveform, which is why the row can print one label per card
+ * and mean a line of the document by it.
  *
  * @param written - the values the document wrote at the top level.
  * @param rules - the blocks as read.
@@ -528,11 +570,14 @@ function resolveSound(written, rules) {
     if (chosen !== undefined && chosen.silent === true) continue
     const spec = chosen ?? DEFAULT_CHIME[state]
     const written_ = block?.volume ?? written.volume
+    const tone = block?.tone ?? written.tone
     channels[state] = {
       labels: spec.labels,
-      frequencies: spec.frequencies,
+      notes: spec.notes,
       gain: round2(written_ ?? DEFAULT_VOLUME),
       unstated: written_ === undefined,
+      tone: tone ?? DEFAULT_TONE,
+      toneUnstated: tone === undefined,
     }
   }
   return {
@@ -948,31 +993,48 @@ function titleWithStatus(current, plan, t) {
 /**
  * The chime is synthesized, and the notes it plays come from the document.
  *
- * The document names notes, not waveforms: `chime A5 E6` is a rising interval, and
- * these two constants decide how a sequence of notes becomes a sound. They are
- * deliberately not part of the language — a chime is a chime, and a document that
- * had to spell out a per-note envelope would be a synthesizer patch rather than a
- * notification setting.
+ * The document names notes and, when it wants to, each note's own length: `chime A5
+ * E6` is a rising interval at the shipped pacing, and `chime A5:200ms E6:200ms` is
+ * the same two notes played as a rhythm. What these two constants decide is only the
+ * pacing of an item that names no length — the shipped note and the shipped overlap
+ * — which is deliberate: an item that names a length is placed by the writer, and an
+ * item that names none is placed by the plugin.
  */
 
-/** How far apart two notes of one chime start, in milliseconds. */
-const CHIME_STAGGER_MS = 90
-
-/** How long one note rings, in milliseconds. */
+/** How long one note rings when the document does not name a length, in milliseconds. */
 const CHIME_NOTE_MS = 130
+
+/** How far apart two items start when the document does not name a length, in milliseconds. */
+const CHIME_STAGGER_MS = 90
 
 /**
  * One state's chime as a list of notes to schedule.
  *
- * @param frequencies - the frequencies the document named, in the order written.
- * @returns `{ frequency, startMs, durationMs }` per note.
+ * An item that names a length takes exactly that long: it rings for it and the next
+ * item starts when it ends, which is what makes a written length the rhythm of the
+ * chime. An item that names none keeps the shipped pair of numbers — it rings
+ * `CHIME_NOTE_MS` and the next one starts `CHIME_STAGGER_MS` later — so the two notes
+ * of the shipped question still overlap into one interval rather than two knocks. A
+ * rest is a step that sounds nothing; it still moves the clock.
+ *
+ * @param items - the chime items the document wrote, in order.
+ * @returns `{ frequency, startMs, durationMs }` per sounding note.
  */
-function chimeNotes(frequencies) {
-  return frequencies.map((frequency, index) => ({
-    frequency,
-    startMs: index * CHIME_STAGGER_MS,
-    durationMs: CHIME_NOTE_MS,
-  }))
+function chimeNotes(items) {
+  const notes = []
+  let startMs = 0
+  for (const item of items) {
+    const lengthMs = typeof item?.lengthMs === 'number' ? item.lengthMs : undefined
+    if (typeof item?.frequency === 'number') {
+      notes.push({
+        frequency: item.frequency,
+        startMs,
+        durationMs: lengthMs ?? CHIME_NOTE_MS,
+      })
+    }
+    startMs += lengthMs ?? CHIME_STAGGER_MS
+  }
+  return notes
 }
 
 /**
@@ -1062,27 +1124,33 @@ function createChime(options) {
 
     /**
      * Play one chime, if the context is running.
-     * @param frequencies - the notes to schedule, in the order written.
-     * @param gain - the loudness to play them at, 0 to 1.
+     * @param channel - the resolved channel: `{ notes, gain, tone }`, exactly the
+     *   object the row prints and the engine plays, so what is heard cannot drift
+     *   from what the document says.
      * @returns whether a sound was actually scheduled.
      */
-    play(frequencies, gain) {
+    play(channel) {
       const audio = ensure()
       if (audio === undefined) return false
       player.resume()
       if (audio.state === 'suspended') return false
-      const notes = chimeNotes(frequencies ?? [])
-      const level = typeof gain === 'number' ? gain : DEFAULT_VOLUME
+      const notes = chimeNotes(channel?.notes ?? [])
+      const level = typeof channel?.gain === 'number' ? channel.gain : DEFAULT_VOLUME
+      // The reader accepted the waveform, so this only guards a caller that did not
+      // read a document at all — a test, or a future host. An unknown waveform is
+      // the shipped one rather than a thrown `TypeError` inside an audio callback.
+      const wave = CHIME_TONES.includes(channel?.tone) ? channel.tone : DEFAULT_TONE
       const startedAt = audio.currentTime
       for (const note of notes) {
         const begin = startedAt + note.startMs / 1000
         const end = begin + note.durationMs / 1000
         const oscillator = audio.createOscillator()
         const envelope = audio.createGain()
-        oscillator.type = 'sine'
+        oscillator.type = wave
         oscillator.frequency.setValueAtTime(note.frequency, begin)
-        // A bare gate on a sine wave clicks; a short attack and a longer release
-        // is what makes it read as a chime rather than as a pop.
+        // A bare gate on a tone clicks; a short attack and a longer release is what
+        // makes it read as a chime rather than as a pop — on any waveform, which is
+        // why the envelope stays the plugin's even now that the waveform is not.
         envelope.gain.setValueAtTime(0, begin)
         envelope.gain.linearRampToValueAtTime(level, begin + 0.012)
         envelope.gain.exponentialRampToValueAtTime(0.0001, end)
@@ -1272,17 +1340,17 @@ const zh = {
   'alert.style.documentLine3': '// 后面是注释；没写的属性沿用该状态的默认值',
   'alert.style.globals': '文档级设置',
   'alert.style.globalsLine':
-    'icon、title 写 on 或 off；sound 写 off、background（默认：只在本页不在前台时响）或 always；chime-gap 是两次提示音的最小间隔；keep-done 是「刚刚完成」保留多久；volume 是默认音量 —— 没在自己块里写 volume 的状态用它。',
+    'icon、title 写 on 或 off；sound 写 off、background（默认：只在本页不在前台时响）或 always；chime-gap 是两次提示音的最小间隔；keep-done 是「刚刚完成」保留多久；volume 是默认音量、tone 是默认音色 —— 没在自己块里写这两项的状态就用它们。',
   'alert.style.state': '状态属性',
   'alert.style.stateLine':
-    'shape、color、motion、speed、chime、volume。时长写单位（1.5s、300ms、2m），省略即秒。',
+    'shape、color、motion、speed、chime、tone、volume。时长写单位（1.5s、300ms、2m），省略即秒。',
   'alert.style.shapes': '形状 shape',
   'alert.style.motions': '动效 motion',
   'alert.style.colors': '颜色 color（预设）',
   'alert.style.colorsLine': '只接受预设名，不接受任意色值：本插件出过的两次事故都是对比度问题（白鱼画在白底上），预设色不会犯这个错。',
   'alert.style.chime': '声音 chime',
   'alert.style.chimeLine':
-    '写音名序列（A5 E6）或频率（880 1318.5），按顺序播放；off 表示这个状态不出声。同一个块里的 volume 是这个状态自己的音量（0–1），会覆盖顶层那行默认音量；卡片上印的就是这两个数字里生效的那一个，两边都没写才用出厂 0.5 并标「（默认）」。',
+    '写音名序列（A5 E6）或频率（880 1318.5），按顺序播放；每个音可以在冒号后写自己的时值 —— A5:200ms 表示这个音响 200ms、下一个音紧接着起音 —— 冒号前写 - 就是休止（-:200ms）。off 表示这个状态不出声。同一个块里的 volume 是这个状态自己的音量（0–1）、tone 是它自己的音色（sine、triangle、square、sawtooth），各自覆盖顶层那一行；卡片上印的就是这两个里生效的那一个，两边都没写才用出厂值并标「（默认）」。',
   'alert.primitive.shape.circle': '圆形',
   'alert.primitive.shape.rounded': '圆角矩形，鱼是横宽的，圆角矩形给它更好的留白',
   'alert.primitive.shape.square': '小圆角方形',
@@ -1297,6 +1365,7 @@ const zh = {
   'alert.preview.audition': '试听',
   'alert.preview.silent': '不出声',
   'alert.preview.gain': '音量',
+  'alert.preview.tone': '音色',
   'alert.preview.fallback': '（默认）',
   'alert.preview.pin': '预览',
   'alert.preview.pinHint': '让浏览器标签页显示这个状态，改配置时可以照着标签看',
@@ -1326,17 +1395,17 @@ const en = {
   'alert.style.documentLine3': '// starts a comment; a property a block omits keeps that state\u2019s default',
   'alert.style.globals': 'Document settings',
   'alert.style.globalsLine':
-    'icon and title take on or off; sound takes off, background (the default: only while this page is not in front) or always; chime-gap is the least time between two chimes; keep-done is how long "just finished" stays lit; volume is the loudness a state uses when its own block does not name one.',
+    'icon and title take on or off; sound takes off, background (the default: only while this page is not in front) or always; chime-gap is the least time between two chimes; keep-done is how long "just finished" stays lit; volume is the default loudness and tone the default waveform, used by every chimed state whose own block does not name one.',
   'alert.style.state': 'State properties',
   'alert.style.stateLine':
-    'shape, color, motion, speed, chime, volume. Durations take a unit (1.5s, 300ms, 2m); a bare number is seconds.',
+    'shape, color, motion, speed, chime, tone, volume. Durations take a unit (1.5s, 300ms, 2m); a bare number is seconds.',
   'alert.style.shapes': 'shape',
   'alert.style.motions': 'motion',
   'alert.style.colors': 'colour (presets)',
   'alert.style.colorsLine': 'Preset names only, never a free colour: both failures this plugin has shipped were contrast failures, and a preset cannot be illegible.',
   'alert.style.chime': 'chime',
   'alert.style.chimeLine':
-    'Note names (A5 E6) or frequencies (880 1318.5), played in order; off keeps this state silent. A block\u2019s volume is that state\u2019s own loudness, 0 to 1, and it overrides the document\u2019s; the card prints whichever of the two is in force, and marks it as the default only when neither is written.',
+    'Note names (A5 E6) or frequencies (880 1318.5), played in order. A note may name its own length after a colon — A5:200ms rings 200ms and the next item starts when it ends — and a leading - is a rest, as in -:200ms. off keeps this state silent. A block\u2019s volume is that state\u2019s own loudness, 0 to 1, and its tone is its own waveform (sine, triangle, square, sawtooth); each overrides the document\u2019s, and the card prints whichever of the two is in force, marking it as the default only when neither is written.',
   'alert.primitive.shape.circle': 'a circle',
   'alert.primitive.shape.rounded': 'a rounded square — the fish is wider than it is tall, and this gives it room',
   'alert.primitive.shape.square': 'a slightly rounded square',
@@ -1351,6 +1420,7 @@ const en = {
   'alert.preview.audition': 'Play',
   'alert.preview.silent': 'silent',
   'alert.preview.gain': 'volume',
+  'alert.preview.tone': 'tone',
   'alert.preview.fallback': '(default)',
   'alert.preview.pin': 'In tab',
   'alert.preview.pinHint': 'Show this state in the browser tab, so an edit can be judged in the tab strip itself',
@@ -1848,14 +1918,14 @@ function StatePreviews({ t, doc, audition, preview }) {
           motion: motionTick(look, tick),
         })
         const channel = doc.sound.channels[state]
-        // The percentage is a line of the document — the state's own `volume`, or the
-        // document's — or the shipped one with a word saying that nothing said. What it
-        // is never is a product of two settings: a card that showed one printed a figure
-        // its reader could not find anywhere.
+        // Both figures on this line are lines of the document — the state's own
+        // `volume` and `tone`, or the document's — or the shipped one with a word
+        // saying that nothing said. What they never are is a product of two settings:
+        // a card that showed one printed a figure its reader could not find anywhere.
         const sound =
           channel === undefined
             ? t('alert.preview.silent')
-            : `${channel.labels.join(' → ')} · ${t('alert.preview.gain')} ${String(Math.round(channel.gain * 100))}%${channel.unstated ? ` ${t('alert.preview.fallback')}` : ''}`
+            : `${channel.labels.join(' → ')} · ${t('alert.preview.gain')} ${String(Math.round(channel.gain * 100))}%${channel.unstated ? ` ${t('alert.preview.fallback')}` : ''} · ${t('alert.preview.tone')} ${channel.tone}${channel.toneUnstated ? ` ${t('alert.preview.fallback')}` : ''}`
         const shown = pinned === state
         return React.createElement(
           'div',
@@ -1880,7 +1950,7 @@ function StatePreviews({ t, doc, audition, preview }) {
                     type: 'button',
                     className: 'dsh-sentry-audition',
                     onClick: () => {
-                      audition(channel.frequencies, channel.gain)
+                      audition(channel)
                     },
                   },
                   t('alert.preview.audition'),
@@ -2400,7 +2470,7 @@ export function apply(ctx) {
     })
     if (chosen === undefined) return
     state.lastSoundAt = Date.now()
-    chime.play(chosen.frequencies, chosen.gain)
+    chime.play(chosen)
   }
 
   /** Recompute everything from the current subscriptions and settings. */
@@ -2677,13 +2747,14 @@ export function apply(ctx) {
               for (const field of SETTINGS) scope.unset(field.id)
             },
             // One state's chime, played on demand by the row's preview cards. The
-            // notes and the gain are whatever the row resolved out of the document,
-            // so what is heard is what the card printed beside it — and the click is
-            // the gesture the autoplay policy waits for, which is why there is no
-            // separate "unlock audio" button.
-            audition: (frequencies, gain) => {
+            // channel — its notes, its lengths, its waveform and its gain — is
+            // whatever the row resolved out of the document, so what is heard is what
+            // the card printed beside it, and the click is the gesture the autoplay
+            // policy waits for, which is why there is no separate "unlock audio"
+            // button.
+            audition: (channel) => {
               chime.resume()
-              chime.play(frequencies, gain)
+              chime.play(channel)
             },
             // Show one state in the tab itself, or with no name go back to the live
             // plan. The row owns this: it sets it when a card is clicked and clears it
