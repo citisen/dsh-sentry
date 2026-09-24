@@ -4,28 +4,38 @@ The runbook for changing the plugin and getting it to users. For the *why*
 behind the setup (and what it does not protect against), see
 [PUBLISHING.md](PUBLISHING.md).
 
-The next version to ship is **0.1.3** — `0.1.0` was published by hand on
-2026-09-21, before trusted publishing could be configured for it.
+The next version to ship is **0.2.0** — a minor, because it adds vocabulary to the
+style document rather than repairing it. `0.1.0` was published by hand on
+2026-09-21, before trusted publishing could be configured for it; `0.1.3` was the
+last CI-staged release.
 
-`0.1.2` is staged and superseded by it: that release made the plugin *activate* on dsh
-`0.1.7-alpha.1`, speaks that line's settings model — the entry's exported `Config` with
-volatile fields, read and written through `configForms` — and renames the Loader row
-from `sentry` to `alert`, so one string names the section on both dsh lines. What it
-got wrong, and `0.1.3` fixes, came out of running it against a real `0.1.7-alpha.1`:
+What `0.2.0` adds, all of it inside the document:
 
-- It read only the `value` layer of a form on that line. Settings there live in two:
-  `value` is what the entry runs with and `user` is the profile patch the user edited,
-  so the row showed the shipped document again on every open and every edit looked
-  discarded. `0.1.3` decodes the user's layer over the running one.
-- A completion accepted in the style field — `alw` completed to `always` with Tab —
-  moved the editor's text without announcing it, so the half-typed word is what got
-  saved. `0.1.3` reconciles the field on blur and on the way out, on top of the fix in
-  `@citisen/litearea@0.2.2` (now the pinned engine; the bundle inlines it).
+- **A note can name its own length.** `chime A5:200ms E6:200ms` — an item that names
+  a length rings for it and the next item starts when it ends, which is what makes a
+  written rhythm a rhythm. An item that names none keeps the engine's shipped pacing
+  (a 130ms note, the next starting 90ms later), so **every chime written before this
+  version sounds exactly as it did**.
+- **`-` is a rest.** `-:200ms` is silence that still takes time, and a chime of
+  nothing but rests resolves to the silence `off` already means.
+- **`tone` picks the waveform** — `sine`, `triangle`, `square`, `sawtooth` — as a
+  document-level default and a per-state override, in the same shape `volume` has.
+  A `tone` written in a `running` block is reported as inert, beside `chime` and
+  `volume`.
 
-**Reject the `0.1.2` stage** when staging this one; approving both would leave two
-stages for the same dist-tag, and approving `0.1.2` would ship both defects. The
-README's Compatibility section also records what the row rename lets dsh's own import
-restore, and which old keys an imported section has to drop.
+It also changes the shipped document: the three chimes are now public-domain
+classical phrases — Beethoven's Fifth for a question, Bach's D-minor Toccata for an
+approval, the "Ode to Joy" theme for a finished turn — chosen for what each state
+means. The document grew from 538 to 945 characters, and the bundle from 280,611 to
+291,622 bytes raw (81,228 → 84,646 gzipped): three melodies cost +3.4KB over the
+wire, because there are still no audio files and nothing is fetched. The preview
+cards print every note a chime writes, so the shipped `done` card's line is longer
+than it was; that is the card describing the document rather than summarising it.
+
+**Check for a stale stage before approving this one** — `npm run release -- list`
+needs `npm login` on a machine whose token was revoked, which is the same login the
+approval step needs. A stage for a version that is not being shipped should be
+rejected rather than left to sit beside this one.
 
 ## The short version
 
