@@ -34,7 +34,10 @@
  *
  * Durations are seconds unless a unit says otherwise: `3`, `1.1s`, `300ms`, `2m`.
  * Notes are equal-tempered names (`A5`, `E6`, `C#4`, `Bb3`) or a frequency in Hz,
- * so a chime reads as music rather than as four magic numbers.
+ * so a chime reads as music rather than as four magic numbers. A note may name its
+ * own length after a colon (`A5:200ms`): an item that names one occupies exactly
+ * that long, which is what makes a line of them a rhythm instead of an interval. A
+ * bare `-` is a rest, and `tone` picks the waveform.
  *
  * Why the grammar lives HERE and not in the editor
  * -----------------------------------------------
@@ -81,6 +84,16 @@ const NOTE_MIN_HZ = 20
 const NOTE_MAX_HZ = 20_000
 
 /**
+ * The shortest and longest length one written chime item may carry, in seconds.
+ *
+ * Bounded for the same reason the frequency is: a `chime` line is a notification,
+ * and a note that rings for a minute — or for a microsecond — is a typo rather than
+ * a sound. Anything inside the range is the writer's business.
+ */
+const CHIME_LENGTH_MIN_S = 0.01
+const CHIME_LENGTH_MAX_S = 10
+
+/**
  * Parse a duration into seconds.
  *
  * `3` and `3s` are the same three seconds, because a bare number being seconds is
@@ -120,6 +133,48 @@ export function noteFrequency(text) {
   const octave = Number.parseInt(match[3], 10)
   const midi = (octave + 1) * 12 + NOTE_LETTERS[letter] + accidental
   return Math.round(NOTE_A4_HZ * 2 ** ((midi - NOTE_A4_MIDI) / 12) * 100) / 100
+}
+
+/**
+ * One item of a `chime` value: a note, or a rest, with an optional length.
+ *
+ * Both halves are spelled in the document's own two value languages — a note is a
+ * name or a frequency, a length is what `speed` and `chime-gap` already take — so
+ * nothing new has to be learned to write one:
+ *
+ *     A5          a note that rings the engine's default and lets the next one start
+ *                 a little before it ends, which is the shipped two-note interval
+ *     A5:200ms    a note that rings 200ms, the next one starting when it ends
+ *     -:200ms     the same 200ms of silence
+ *
+ * A length is what turns a chime into a rhythm: an item that names one occupies
+ * exactly that long, so a sequence of them reads end to end. An item that names none
+ * keeps the engine's default overlap, which is what the shipped chime is.
+ *
+ * @param text - the item as written.
+ * @returns `{ frequency }` or `{ rest: true }`, each carrying `lengthMs` when one
+ *   was written, or `{ problem: 'note' | 'length' }` when the text is not an item.
+ */
+export function parseChimeItem(text) {
+  const colon = text.indexOf(':')
+  const head = colon === -1 ? text : text.slice(0, colon)
+  const written = colon === -1 ? undefined : text.slice(colon + 1)
+  let lengthMs
+  if (written !== undefined) {
+    const seconds = parseDuration(written)
+    if (seconds === undefined || seconds < CHIME_LENGTH_MIN_S || seconds > CHIME_LENGTH_MAX_S) {
+      return { problem: 'length' }
+    }
+    lengthMs = Math.round(seconds * 1000)
+  }
+  if (head === '-') return lengthMs === undefined ? { rest: true } : { rest: true, lengthMs }
+  const named = noteFrequency(head)
+  const hertz = named ?? (/^\d+(?:\.\d+)?$/.test(head) ? Number.parseFloat(head) : undefined)
+  if (hertz === undefined || hertz < NOTE_MIN_HZ || hertz > NOTE_MAX_HZ) {
+    return { problem: 'note' }
+  }
+  const frequency = Math.round(hertz * 100) / 100
+  return lengthMs === undefined ? { frequency } : { frequency, lengthMs }
 }
 
 // ─── the reader ──────────────────────────────────────────────────────────────
@@ -412,7 +467,9 @@ export function readStyleDocument(text, options) {
  * @returns a readable phrase.
  */
 function expectedValue(spec) {
-  if (spec.kind === 'chime') return 'note names such as "A5 E6", or "off" for silence'
+  if (spec.kind === 'chime') {
+    return 'note names such as "A5 E6" — a note may name its own length as "A5:200ms", and "-:200ms" is a rest — or "off" for silence'
+  }
   if (spec.kind === 'duration') return 'a duration such as 1.5s or 300ms'
   if (spec.kind === 'number') return `a number between ${String(spec.min)} and ${String(spec.max)}`
   return (spec.words ?? []).join(', ')
@@ -439,23 +496,35 @@ function readValue(key, values, spec) {
       }
     }
     if (values.length === 1 && (values[0].text === 'off' || values[0].text === 'none')) {
-      return { value: { silent: true, labels: [], frequencies: [] } }
+      return { value: { silent: true, labels: [], notes: [] } }
     }
-    const frequencies = []
+    const notes = []
     const labels = []
     for (const word of values) {
-      const named = noteFrequency(word.text)
-      const hertz = named ?? (/^\d+(?:\.\d+)?$/.test(word.text) ? Number.parseFloat(word.text) : undefined)
-      if (hertz === undefined || hertz < NOTE_MIN_HZ || hertz > NOTE_MAX_HZ) {
+      const item = parseChimeItem(word.text)
+      if (item.problem === 'length') {
         return {
           mark: word,
-          message: `"${word.text}" is not a note — write a note name such as A5, or a frequency in Hz such as 880.`,
+          message: `"${word.text}" has no length after its colon — write a duration such as 200ms, or drop the colon.`,
         }
       }
-      frequencies.push(Math.round(hertz * 100) / 100)
+      if (item.problem === 'note') {
+        return {
+          mark: word,
+          message: `"${word.text}" is not a note — write a note name such as A5, a frequency in Hz such as 880, or \`-\` for a rest.`,
+        }
+      }
+      notes.push(item)
       labels.push(word.text)
     }
-    return { value: { silent: false, labels, frequencies } }
+    // A chime of nothing but rests cannot sound, and the language already has a
+    // word for silence. Resolving it to that word is what keeps the row honest: a
+    // channel that exists is a card with a Play button, and this one would have
+    // nothing to play.
+    if (notes.every((item) => item.rest === true)) {
+      return { value: { silent: true, labels: [], notes: [] } }
+    }
+    return { value: { silent: false, labels, notes } }
   }
 
   if (values.length === 0) {
@@ -537,6 +606,7 @@ function readValue(key, values, spec) {
  *   Presets on purpose: a free colour can be illegible.
  * @property {readonly string[]} [modes] - the on/off/background words.
  * @property {readonly string[]} [notes] - the note names a completion offers.
+ * @property {readonly string[]} [tones] - the waveforms `tone` accepts.
  * @property {Readonly<Record<string, object>>} [defaults] - the shipped look per
  *   state, used to rank a completion and to document a word.
  */
@@ -565,6 +635,7 @@ export function dshSentryStyleGrammar(options = {}) {
   const COLOR_NAMES = Object.keys(options.colors ?? {})
   const MODES = options.modes ?? []
   const NOTES = options.notes ?? []
+  const TONES = options.tones ?? []
   const LOOK = options.defaults ?? {}
 
   /** Every property name, either scope, in the order a list offers them. */
@@ -616,11 +687,13 @@ export function dshSentryStyleGrammar(options = {}) {
       'chime-gap': { detail: 'document setting: least time between two chimes' },
       'keep-done': { detail: 'document setting: how long "just finished" stays lit' },
       volume: { detail: 'document setting: the default loudness' },
+      tone: { detail: 'document setting: the default waveform' },
       shape: { detail: 'the background shape' },
       color: { detail: 'the background colour, from the preset palette' },
       motion: { detail: 'what moves while the state lasts' },
       speed: { detail: 'the motion rate, in seconds' },
       chime: { detail: 'the notes this state sounds' },
+      tone: { detail: 'this state\u2019s own waveform' },
       volume: { detail: 'this state\u2019s own loudness' },
     },
   })
@@ -673,6 +746,18 @@ export function dshSentryStyleGrammar(options = {}) {
     },
   })
 
+  const TONE_VOCAB = closedVocabulary({
+    id: 'tone',
+    words: TONES,
+    scope: 'value.tone',
+    docs: {
+      sine: { detail: 'a pure tone — the shipped waveform', body: 'Only the fundamental, so it is the softest of the four and the one that survives a low volume intact.' },
+      triangle: { detail: 'a soft tone with a little more edge than sine', body: 'A few odd harmonics: brighter than `sine`, still gentle.' },
+      square: { detail: 'a hollow, retro tone', body: 'Odd harmonics only — the chiptune sound. Noticeably louder than `sine` at the same `volume`, so turn the volume down rather than the tone.' },
+      sawtooth: { detail: 'a bright, buzzy tone', body: 'Every harmonic: the harshest of the four, and the one most likely to read as an alarm rather than a chime.' },
+    },
+  })
+
   /**
    * What each property explains about itself, per scope.
    *
@@ -701,6 +786,10 @@ export function dshSentryStyleGrammar(options = {}) {
         detail: 'the default loudness',
         body: 'The loudness every chimed state plays at unless its own block names one. Both spellings are the same kind of number: a block\u2019s `volume` does not multiply this one, it replaces it.',
       },
+      tone: {
+        detail: 'the default waveform',
+        body: `The waveform every chimed state plays unless its own block names one: ${TONES.join(', ')}. Like \`volume\`, a block\u2019s line replaces this one rather than layering on it.`,
+      },
     },
     state: {
       shape: { detail: 'the background shape', body: `One of ${SHAPES.join(', ')}.` },
@@ -709,7 +798,11 @@ export function dshSentryStyleGrammar(options = {}) {
       speed: { detail: 'the motion rate', body: 'Seconds per revolution for `turn`, per cycle otherwise. `1.1s` and `1100ms` are the same rate.' },
       chime: {
         detail: 'the notes this state sounds',
-        body: 'Note names (`A5 E6`) or frequencies in Hz (`880 1318.5`), played in order. `off` silences this state alone.',
+        body: 'Note names (`A5 E6`) or frequencies in Hz (`880 1318.5`), played in order. A note may name its own length — `A5:200ms` rings 200ms and the next item starts when it ends — and `-:200ms` is that much silence. `off` silences this state alone.',
+      },
+      tone: {
+        detail: 'this state\u2019s own waveform',
+        body: `One of ${TONES.join(', ')}. Overrides the document\u2019s default waveform for this state alone.`,
       },
       volume: {
         detail: 'this state\u2019s own loudness',
@@ -725,6 +818,7 @@ export function dshSentryStyleGrammar(options = {}) {
     ['value.color', COLOR_VOCAB],
     ['value.motion', MOTION_VOCAB],
     ['value.mode', MODE_VOCAB],
+    ['value.tone', TONE_VOCAB],
   ])
 
   // ── helpers ───────────────────────────────────────────────────────────────
@@ -816,8 +910,20 @@ export function dshSentryStyleGrammar(options = {}) {
       )
       for (const note of rows) {
         note.documentation =
-          'Notes play in order. Any equal-tempered name works (`A5`, `C#4`, `Bb3`), as does a frequency in Hz (`880`).'
+          'Notes play in order. Any equal-tempered name works (`A5`, `C#4`, `Bb3`), as does a frequency in Hz (`880`). Add a length after a colon to place the next item yourself: `A5:200ms`.'
       }
+      rows.push({
+        label: '-',
+        // Accepting a rest writes the colon too, because the length is the whole
+        // point of a rest: `-` alone is one step of silence, and one step is what
+        // the notes around it already decide.
+        insert: '-:',
+        append: '',
+        kind: 'note',
+        detail: current === '-' ? 'the current value' : 'a rest — silence of a length you write',
+        documentation: 'Silence that still takes time: `-:200ms` waits 200ms before the next note.',
+        sortText: current === '-' ? '0' : '1',
+      })
       rows.push({
         label: 'off',
         insert: 'off',
@@ -838,7 +944,9 @@ export function dshSentryStyleGrammar(options = {}) {
             ? COLOR_VOCAB
             : key === 'motion'
               ? MOTION_VOCAB
-              : MODE_VOCAB
+              : key === 'tone'
+                ? TONE_VOCAB
+                : MODE_VOCAB
       return (spec.words ?? []).map((word) =>
         wordRow(word, vocabulary, { current, append: '\n', kind: 'value' }),
       )
@@ -865,15 +973,18 @@ export function dshSentryStyleGrammar(options = {}) {
     id: 'dsh-sentry-style',
     name: 'dsh-sentry style document',
 
-    // A note is `A5`, an accidental is part of the note, and a number is `1.5s` — all
-    // three are one token, so all three are word characters here. The dot is the one
-    // worth explaining: leaving it out was the earlier choice, to stop a stray `circle.`
-    // being read as one unknown word, and it cost more than it bought. `wordChars` is
-    // also what a completion filters by and what a double click selects, so without the
-    // dot the editor believed the word in `volume 0.2` was `2` — and replacing that word
-    // with `0.25` wrote `0.0.25`. A token the reader treats as one value has to be one
+    // A note is `A5`, a chime item's length is `A5:200ms`, an accidental is part of
+    // the note, and a number is `1.5s` — all four are one token, so all four are word
+    // characters here. The dot is the one worth explaining: leaving it out was the
+    // earlier choice, to stop a stray `circle.` being read as one unknown word, and it
+    // cost more than it bought. `wordChars` is also what a completion filters by and
+    // what a double click selects, so without the dot the editor believed the word in
+    // `volume 0.2` was `2` — and replacing that word with `0.25` wrote `0.0.25`. The
+    // colon is the same argument: the reader treats `A5:200ms` as one value, so the
+    // editor has to treat it as one word, or the caret lands inside a token the
+    // language never splits. A token the reader treats as one value has to be one
     // word to the editor.
-    wordChars: /[\p{L}\p{N}_#.-]/u,
+    wordChars: /[\p{L}\p{N}_#.:-]/u,
 
     rules: [
       { kind: 'match', scope: 'comment', pattern: /\/\/[^\n]*/ },
@@ -898,15 +1009,34 @@ export function dshSentryStyleGrammar(options = {}) {
       // layer cannot know.
       { kind: 'words', words: KEY_VOCAB, when: { firstOnLine: true } },
 
-      // Values, painted by what they are. The sets are disjoint, so membership
-      // alone places a word and a value written for the wrong property is still
-      // painted as the value it is — the structural pass is what says it is in the
-      // wrong place, with the exact range.
+      // Values, painted by what they are. Membership alone places a word for every
+      // vocabulary but one: `square` is both a shape and a waveform, and a word
+      // cannot be painted under two scopes at once. The waveform therefore claims
+      // its own line — `when.line` is what makes the claim — and everywhere else
+      // `square` stays the shape it has always been. The rest is unchanged: a value
+      // written for the wrong property is still painted as the value it is, and the
+      // structural pass is what says it is in the wrong place, with the exact range.
+      {
+        kind: 'words',
+        words: TONE_VOCAB,
+        when: { line: /^\s*tone\s/ },
+      },
       { kind: 'words', words: SHAPE_VOCAB },
       { kind: 'words', words: COLOR_VOCAB },
       { kind: 'words', words: MOTION_VOCAB },
       { kind: 'words', words: MODE_VOCAB },
-      { kind: 'match', scope: 'value.note', pattern: /[A-Ga-g][#b]?\d/ },
+
+      // A chime item that names its own length, and a rest — both before the two
+      // plain-value rules below, because a rule claims only the prefix it matches
+      // and `A5` claimed out of `A5:200ms` would leave the length to fall through as
+      // an unknown word. A bare note and a bare number keep the scopes they had.
+      {
+        kind: 'match',
+        scope: 'value.note',
+        pattern: /(?:[A-Ga-g][#b]?-?\d|\d+(?:\.\d+)?):\d+(?:\.\d+)?(?:ms|s|m)?/,
+      },
+      { kind: 'match', scope: 'value.note', pattern: /-(?::\d+(?:\.\d+)?(?:ms|s|m)?)?/ },
+      { kind: 'match', scope: 'value.note', pattern: /[A-Ga-g][#b]?-?\d/ },
       { kind: 'match', scope: 'value.number', pattern: /\d+(?:\.\d+)?(?:ms|s|m)?/ },
 
       // Anything left is a word this language does not know. Braces are excluded
@@ -1036,11 +1166,32 @@ export function dshSentryStyleGrammar(options = {}) {
         return doc === undefined ? undefined : { title: token.text, detail: doc.detail, body: doc.body }
       }
       if (token.scope === 'value.note') {
-        const frequency = noteFrequency(token.text)
+        const item = parseChimeItem(token.text)
+        const length = /:(\d+(?:\.\d+)?(?:ms|s|m)?)$/.exec(token.text)?.[1]
+        if (item.problem !== undefined) {
+          return {
+            title: token.text,
+            detail: 'not a chime item',
+            body: 'Write a note name such as `A5`, a frequency in Hz such as `880`, or `-` for a rest. A length after `:` is a duration such as `200ms`.',
+          }
+        }
+        if (item.rest === true) {
+          return {
+            title: token.text,
+            detail: 'a rest',
+            body:
+              length === undefined
+                ? 'Silence that still takes time: it moves the chime on without sounding.'
+                : `Silence for \`${length}\`: the next item starts when it ends.`,
+          }
+        }
         return {
           title: token.text,
-          detail: frequency === undefined ? 'a note' : `${String(frequency)} Hz`,
-          body: 'Notes play in order, each one starting a little after the one before it. Frequencies in Hz work too.',
+          detail: `${String(item.frequency)} Hz`,
+          body:
+            length === undefined
+              ? 'Notes play in order, each one starting a little after the one before it. Frequencies in Hz work too.'
+              : `\`${length}\` is this item's length: the next item starts when this one ends, so a line of lengths is the rhythm of the chime.`,
         }
       }
       if (token.scope === 'value.number') {
